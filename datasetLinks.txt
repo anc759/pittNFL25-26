@@ -1,0 +1,7 @@
+Output: https://www.dropbox.com/scl/fi/ok6t526faif91y8blz38p/wholeSeasonOutput.csv?rlkey=klo3j7ottrdxr6itlakeg8kn1&st=hejbg7bo&dl=1
+
+Input: https://www.dropbox.com/scl/fi/7gjvxlj7rd4fknahghito/wholeSeasonInTrimmed.csv?rlkey=uirhf9ss33kgcue6sulr6k2zu&st=b5cpbmve&dl=1
+
+Need to use readr::read_csv(), especially with the input dataset.
+
+Non-trimmed data set not included because my free dropbox account said no you dont have enough storage, and I dont feel like figuring out how to wrangle from OneDrive into R.
