@@ -1,7 +1,20 @@
-Output: https://www.dropbox.com/scl/fi/ok6t526faif91y8blz38p/wholeSeasonOutput.csv?rlkey=klo3j7ottrdxr6itlakeg8kn1&st=hejbg7bo&dl=1
+Links properly modified to allow R to read them.
 
+Metadata: https://www.dropbox.com/scl/fi/mfmdzsxknzfyjwqibihn2/supplementary_data.csv?rlkey=cbf1srtyqite9aezmlawenv1b&st=j00g0nlj&dl=1
+
+
+Whole Season:
+
+Output: https://www.dropbox.com/scl/fi/c9evz6f47bpdewcoasll5/wholeSeasonOutput.csv?rlkey=rk5ycbueg1kdxm9st5o7mkai3&st=jeekrr8r&dl=1
 Input: https://www.dropbox.com/scl/fi/7gjvxlj7rd4fknahghito/wholeSeasonInTrimmed.csv?rlkey=uirhf9ss33kgcue6sulr6k2zu&st=b5cpbmve&dl=1
 
-Need to use readr::read_csv(), especially with the input dataset.
+[*Need to use readr::read_csv(), especially with the input dataset.]
 
-Non-trimmed data set not included because my free dropbox account said no you dont have enough storage, and I dont feel like figuring out how to wrangle from OneDrive into R.
+[Non-trimmed data set not included because my free dropbox account said no you dont have enough storage, and I dont feel like figuring out how to wrangle from OneDrive into R.]
+
+
+Week 1 (if you want to test something and not have to use the whole thing)
+
+Output: https://www.dropbox.com/scl/fi/gxllcdu1jhe7q9ub5s06c/week1OutputAdjusted.csv?rlkey=yfwfpu340gidsk9sis2z2w1dz&st=wst8dcbq&dl=1
+  ("adjusted" in the file name just means that the frame IDs are shifted to be continuous to input data for each play, plus player position added)
+Input: https://www.dropbox.com/scl/fi/3ekmizvvk20m83ehini9n/input_2023_w01.csv?rlkey=dnuyng0lbvjq7cbpdsryf5m5t&st=y09ynifk&dl=1
