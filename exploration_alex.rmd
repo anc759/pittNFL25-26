@@ -1,0 +1,115 @@
+```{r}
+library(dplyr)
+```
+
+
+
+
+
+```{r}
+nfl_data_output <- read.csv('/Users/alexanderdukart/Downloads/output_2023_w01.csv')
+nfl_data_input <- read.csv("/Users/alexanderdukart/Downloads/input_2023_w01.csv")
+```
+
+analise function
+
+```{r}
+inCircleYesNo <- function(inputDataset, outputDataset){
+  
+  whereIsTheBallAll <-
+    inputDataset %>%
+    select(game_id, play_id, ball_land_x, ball_land_y)
+  
+  whereIsTheBall <-
+    whereIsTheBallAll[!duplicated(whereIsTheBallAll),]
+  
+  
+  withOut<-
+    outputDataset %>%
+    group_by(game_id, play_id, nfl_id) %>%
+    filter(frame_id == max(frame_id)) %>%
+    left_join(whereIsTheBall, by = c("game_id", "play_id")) %>%
+    mutate(distFromBallLand = sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2),
+           inCircleOutcome = ifelse(distFromBallLand <= 2, TRUE, FALSE)) %>%
+    select(game_id, play_id, nfl_id, inCircleOutcome, distFromBallLand)
+  
+  out <- outputDataset %>%
+    left_join(withOut, by = c("game_id", "play_id", "nfl_id"))
+  
+  return(out)
+}
+nfl_w1 <- inCircleYesNo(inputDataset = nfl_data_input, outputDataset = nfl_data_output)
+```
+
+
+General preprocessing function for the input data.
+```{r}
+
+data_preprocessing <- function(input_data){
+  input_data %>%
+    mutate(
+      correct_o = if_else(
+        play_direction == "right",
+        (o - 90) %% 360,
+        (o + 90) %% 360
+      ),
+      correct_d = if_else(
+        play_direction == "right",
+        (dir - 90) %% 360,
+        (dir + 90) %% 360
+      ),distFromBallLand = sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2)
+    )
+}
+
+test <- data_preprocessing(nfl_data_input)
+#test <- nfl_data_input[nfl_data_input$play_direction == "right",]
+#test$fixed_o = (test$o + 90) %% 360
+#test$fixed_direction = (test$dir + 90) %% 360
+```
+
+
+
+add the response to the predictor dataset
+```{r}
+before_pass <- data_preprocessing(nfl_data_input)
+
+outcomes <-
+    nfl_w1 %>%
+    filter(frame_id == 1) %>%
+    select(game_id, play_id, nfl_id,inCircleOutcome)
+
+before_pass_w_outcome <-
+    before_pass %>%
+    left_join(outcomes, by = c("game_id", "play_id","nfl_id"))
+
+
+
+```
+
+Outcome balance 
+```{r}
+table(before_pass_w_outcome$inCircleOutcome)
+```
+53280 false to 23119 true. Not a bad balance here, we can maybe tweek the classification distance cutoff to make it more balanced but this isnt to bad. Curious what it looks like for the entire dataset we are working with.
+
+
+```{r}
+mean(as.numeric(before_pass_w_outcome$inCircleOutcome),na.rm=TRUE)
+```
+
+also roughly 30 percent of players in our input dataset reach the target zone according to our cutoff.
+
+
+
+basic random forest, just for S&G
+```{r}
+library(ranger)
+data_for_rf_model <- before_pass_w_outcome %>%
+  select(inCircleOutcome,distFromBallLand,a,s)
+data_for_rf_model <- na.omit(data_for_rf_model)
+model <- ranger(inCircleOutcome~distFromBallLand + a + s,data = data_for_rf_model)
+```
+
+```{r}
+model$confusion.matrix
+```
