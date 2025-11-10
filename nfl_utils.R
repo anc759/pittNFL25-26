@@ -658,73 +658,58 @@ plot_play_tracks_enhanced <- function(
     )
 }
 
-# =============================================================================
-# Voronoi overlay utilities (NFL field) — requires: sf
+## =============================================================================
+# VORONOI — SIMPLE "WORKING" VERSION (geom_sf + manual fill)
+# Add this AFTER your base ggplot so it sets the final coords.
 # =============================================================================
 
-#' @title Build Voronoi polygons for a single frame (clipped to field)
-#' @description
-#' Computes Voronoi cells for all players in a given frame, then clips the
-#' tessellation to the NFL field rectangle (default [0,120] x [0,53.3]).
-#' Returns an `sf` polygon data frame with player attributes attached.
-#'
-#' @param df_tracks Data frame with at least: frame_id, nfl_id, x, y.
-#'   Helpful extras: player_name, player_side ("Offense"/"Defense"), player_role.
-#' @param frame Integer frame to compute the tessellation for.
-#' @param field_xlim numeric length-2, default c(0,120)
-#' @param field_ylim numeric length-2, default c(0,53.3)
-#' @param team_side "both"|"offense"|"defense" (filter which points to include)
-#' @return sf POLYGON data frame with columns:
-#'   nfl_id, player_label, player_side, player_role, frame_id, geometry
-#' @examples
-#' # polys <- nfl_build_voronoi(tracks, frame = 18)
+# 1) Build Voronoi polygons for a given frame (clipped to field)
 nfl_build_voronoi <- function(
     df_tracks,
     frame,
     field_xlim = c(0, 120),
     field_ylim = c(0, 53.3),
     team_side  = c("both","offense","defense")
-) {
+){
   if (!requireNamespace("sf", quietly = TRUE)) {
-    stop("Package 'sf' is required for Voronoi polygons. Install with install.packages('sf').")
+    stop("Package 'sf' is required. install.packages('sf')")
   }
   team_side <- match.arg(team_side)
 
-  # Filter to frame & (optionally) side
+  # Filter points
   pts <- df_tracks[df_tracks$frame_id == frame, , drop = FALSE]
-  if (nrow(pts) == 0) stop(sprintf("No rows found in frame %s.", frame))
+  if (nrow(pts) == 0) stop(sprintf("No rows in frame %s.", frame))
   if ("player_side" %in% names(pts)) {
     if (team_side == "offense") pts <- pts[pts$player_side == "Offense", , drop = FALSE]
     if (team_side == "defense") pts <- pts[pts$player_side == "Defense", , drop = FALSE]
   }
-  if (nrow(pts) == 0) stop(sprintf("No player points after team_side='%s' at frame %s.", team_side, frame))
+  if (nrow(pts) == 0) stop(sprintf("No points after team_side='%s' at frame %s.", team_side, frame))
 
+  # Labels
   pts$player_label <- ifelse(!is.na(pts$player_name) & nzchar(pts$player_name),
                              pts$player_name, paste0("ID ", pts$nfl_id))
 
-  # sf points (planar yards; no CRS)
+  # SF points (planar, no CRS)
   sf_pts <- sf::st_as_sf(pts, coords = c("x","y"), remove = FALSE, crs = sf::NA_crs_)
 
-  # Field rectangle polygon (for bounding & clipping)
+  # Field rectangle
   rect_mat <- matrix(
     c(field_xlim[1], field_ylim[1],
       field_xlim[1], field_ylim[2],
       field_xlim[2], field_ylim[2],
       field_xlim[2], field_ylim[1],
-      field_xlim[1], field_ylim[1]), ncol = 2, byrow = TRUE
+      field_xlim[1], field_ylim[1]), byrow = TRUE, ncol = 2
   )
   field_poly <- sf::st_sfc(sf::st_polygon(list(rect_mat)), crs = sf::NA_crs_)
 
-  # Voronoi tessellation inside field envelope
+  # Voronoi inside envelope -> polygons -> clip -> valid
   vor_raw   <- sf::st_voronoi(sf::st_union(sf_pts), envelope = field_poly)
   vor_polys <- sf::st_collection_extract(vor_raw, "POLYGON")
+  vor_sf    <- sf::st_sf(geometry = vor_polys)
+  vor_sf    <- suppressWarnings(sf::st_intersection(vor_sf, field_poly))
+  vor_sf    <- suppressWarnings(sf::st_make_valid(vor_sf))
 
-  # Turn the GEOMETRYCOLLECTION into an sf polygon layer
-  vor_sf <- sf::st_sf(geometry = vor_polys)
-  # Clip to field (ensures bounded cells)
-  vor_sf <- suppressWarnings(sf::st_intersection(vor_sf, field_poly))
-
-  # Map polygons back to generating points
+  # Map back each polygon to nearest generating point
   idx <- sf::st_nearest_feature(vor_sf, sf_pts)
   vor_sf <- sf::st_set_geometry(
     cbind(
@@ -733,156 +718,139 @@ nfl_build_voronoi <- function(
     ),
     sf::st_geometry(vor_sf)
   )
-
-  dplyr::relocate(vor_sf, nfl_id, player_label, player_side, player_role, frame_id)
+  vor_sf
 }
 
-# ---- helper: convert sf polygon layer to plain data.frame for geom_polygon ----
-nfl_sf_to_polygon_df <- function(vor_sf) {
-  if (!requireNamespace("sf", quietly = TRUE)) {
-    stop("Package 'sf' is required. Install with install.packages('sf').")
-  }
-  vor_sf <- sf::st_cast(vor_sf, "POLYGON", warn = FALSE)
-  vor_sf$poly_id <- seq_len(nrow(vor_sf))
-
-  cc <- sf::st_coordinates(vor_sf)
-  df <- as.data.frame(cc)
-  names(df)[1:2] <- c("x","y")
-  df$poly_id <- vor_sf$poly_id[df$L1]
-  df$ring_id <- df$L2
-  df$group   <- interaction(df$poly_id, df$ring_id, drop = TRUE)
-
-  attrs <- sf::st_drop_geometry(vor_sf)
-  df <- merge(
-    df,
-    attrs[, c("poly_id","nfl_id","player_label","player_side","player_role","frame_id")],
-    by = "poly_id",
-    all.x = TRUE,
-    sort = FALSE
-  )
-
-  df <- df[order(df$poly_id, df$ring_id, ave(df$x, df$group, FUN = seq_along)), ]
-  df
-}
-
-#' @title Voronoi overlay ggplot layer (no coord override)
-#' @description
-#' Returns a `ggplot2` layer using `geom_polygon` so it doesn't replace your
-#' existing coordinate system (e.g., `coord_fixed`). Choose fill by team, player,
-#' or constant.
-#'
-#' @param vor_sf The sf polygons from `nfl_build_voronoi()`.
-#' @param fill_by "team"|"player"|"none"
-#' @param alpha Polygon fill alpha (default 0.25).
-#' @param border_color Outline color (default "white").
-#' @param border_size Outline line width (default 0.3).
-#' @return A `ggplot2` layer you can add with `+`.
-#' @examples
-#' # p + nfl_geom_voronoi_layer(vor_sf, fill_by="team")
-nfl_geom_voronoi_layer <- function(
+# 2) Add Voronoi overlay (team OR player colors), using geom_sf + manual scale
+#    IMPORTANT: This function **sets coord_sf**; add it LAST in your pipeline.
+nfl_add_voronoi_sf <- function(
+    p,
     vor_sf,
-    fill_by        = c("team","player","none"),
-    alpha          = 0.25,
-    border_color   = "white",
-    border_size    = 0.3,
-    # palettes (edit to taste)
-    team_colors    = c(Offense = "#004C97", Defense = "#FF6F61", Unknown = "#9E9E9E"),
-    player_palette = NULL  # NULL => auto palette; or pass a vector/function/palette name
-) {
+    fill_by      = c("team","player","none"),
+    alpha        = 0.30,
+    border_color = "white",
+    border_size  = 0.3,
+    # palettes
+    team_colors  = c(Offense = "#1565C0", Defense = "#EF5350", Unknown = "#9E9E9E"),
+    player_palette = NULL,
+    # coord (match your field)
+    xlim = c(0, 120),
+    ylim = c(0, 53.3)
+){
   fill_by <- match.arg(fill_by)
 
-  # Convert sf -> plain df for geom_polygon (keeps your coord system intact)
-  vdf <- nfl_sf_to_polygon_df(vor_sf)
-
-  # Helper: attach a vor_fill column (hex) and return layers using fill identity
-  make_identity_layers <- function(df, fill_values, fill_key, legend_title) {
-    # Map each category to a hex fill, attach as a column
-    df$vor_key <- as.character(df[[fill_key]])
-    df$vor_key[is.na(df$vor_key)] <- "Unknown"
-
-    # Ensure we have a color for every key in the data
-    keys_present <- unique(df$vor_key)
-    pal <- fill_values
-    # If any missing keys, assign a fallback grey
-    if (!all(keys_present %in% names(pal))) {
-      missing_keys <- setdiff(keys_present, names(pal))
-      pal <- c(pal, setNames(rep("#9E9E9E", length(missing_keys)), missing_keys))
-    }
-    df$vor_fill <- pal[df$vor_key]
-
-    # Build legend mapping (identity scale)
-    layers <- list(
-      ggplot2::geom_polygon(
-        data = df,
-        ggplot2::aes(x = x, y = y, group = group, fill = vor_fill),
-        color = border_color, linewidth = border_size,
-        alpha = alpha, inherit.aes = FALSE, show.legend = TRUE
-      ),
-      ggplot2::scale_fill_identity(
-        name   = legend_title,
-        guide  = "legend",
-        labels = setNames(names(pal[keys_present]), pal[keys_present]),
-        breaks = pal[keys_present]
-      )
+  # Base: unfilled polygons (if requested)
+  if (fill_by == "none") {
+    layer <- ggplot2::geom_sf(
+      data  = vor_sf,
+      fill  = scales::alpha("grey70", alpha),
+      color = border_color, linewidth = border_size,
+      inherit.aes = FALSE
     )
-    layers
+    return(
+      p + layer +
+        ggplot2::coord_sf(default_crs = sf::NA_crs_, expand = FALSE, xlim = xlim, ylim = ylim)
+    )
   }
 
   if (fill_by == "team") {
-    # Normalize side labels
-    vdf$player_side <- as.character(vdf$player_side)
-    vdf$player_side[is.na(vdf$player_side)] <- "Unknown"
-    vdf$player_side <- ifelse(vdf$player_side %in% c("Offense","Defense","Unknown"),
-                              vdf$player_side, "Unknown")
-    return(make_identity_layers(
-      df          = vdf,
-      fill_values = team_colors,
-      fill_key    = "player_side",
-      legend_title= "Side"
-    ))
-  }
+    # normalize sides
+    vor_sf$player_side <- as.character(vor_sf$player_side)
+    vor_sf$player_side[is.na(vor_sf$player_side)] <- "Unknown"
+    vor_sf$player_side[!vor_sf$player_side %in% c("Offense","Defense","Unknown")] <- "Unknown"
 
-  if (fill_by == "player") {
-    # Build player palette
-    players <- sort(unique(vdf$player_label))
-    if (is.null(player_palette)) {
-      # Prefer nice qualitative palette if available
-      if (requireNamespace("scales", quietly = TRUE)) {
-        cols <- scales::hue_pal()(length(players))
-      } else {
-        cols <- grDevices::hcl.colors(length(players), "Set3")
-      }
-    } else if (is.function(player_palette)) {
-      cols <- player_palette(length(players))
-    } else if (is.character(player_palette) && length(player_palette) == 1) {
-      # interpret as a named palette (e.g., "Set3")
-      cols <- tryCatch(grDevices::hcl.colors(length(players), palette = player_palette),
-                       error = function(...) grDevices::rainbow(length(players)))
-    } else if (is.character(player_palette) && length(player_palette) >= length(players)) {
-      cols <- player_palette[seq_along(players)]
-    } else {
-      cols <- grDevices::rainbow(length(players))
+    # subset palette to present levels (but keep both in legend)
+    present <- intersect(names(team_colors), unique(vor_sf$player_side))
+    pal_use <- team_colors
+    if (!all(unique(vor_sf$player_side) %in% names(pal_use))) {
+      missing <- setdiff(unique(vor_sf$player_side), names(pal_use))
+      pal_use <- c(pal_use, stats::setNames(rep("#9E9E9E", length(missing)), missing))
     }
-    pal_players <- setNames(cols, players)
 
-    return(make_identity_layers(
-      df          = vdf,
-      fill_values = pal_players,
-      fill_key    = "player_label",
-      legend_title= "Player (Voronoi)"
-    ))
+    return(
+      p +
+        ggplot2::geom_sf(
+          data = vor_sf,
+          ggplot2::aes(fill = player_side),
+          color = border_color, linewidth = border_size, alpha = alpha, inherit.aes = FALSE
+        ) +
+        ggplot2::scale_fill_manual("Side", values = pal_use, drop = FALSE) +
+        ggplot2::coord_sf(default_crs = sf::NA_crs_, expand = FALSE, xlim = xlim, ylim = ylim)
+    )
   }
 
-  # No fill mapping — constant translucent grey with no legend
-  list(
-    ggplot2::geom_polygon(
-      data  = vdf,
-      ggplot2::aes(x = x, y = y, group = group),
-      fill  = scales::alpha("#9E9E9E", alpha),
-      color = border_color,
-      linewidth = border_size,
-      inherit.aes = FALSE,
-      show.legend = FALSE
-    )
+  # fill_by == "player"
+  players <- sort(unique(vor_sf$player_label))
+  cols <- if (is.null(player_palette)) {
+    if (requireNamespace("scales", quietly = TRUE)) scales::hue_pal()(length(players)) else grDevices::hcl.colors(length(players), "Set3")
+  } else if (is.function(player_palette)) {
+    player_palette(length(players))
+  } else if (is.character(player_palette) && length(player_palette) == 1) {
+    # interpret as hcl palette name
+    tryCatch(grDevices::hcl.colors(length(players), palette = player_palette),
+             error = function(...) grDevices::rainbow(length(players)))
+  } else if (is.character(player_palette) && length(player_palette) >= length(players)) {
+    player_palette[seq_along(players)]
+  } else {
+    grDevices::rainbow(length(players))
+  }
+  pal_players <- stats::setNames(cols, players)
+
+  p +
+    ggplot2::geom_sf(
+      data = vor_sf,
+      ggplot2::aes(fill = player_label),
+      color = border_color, linewidth = border_size, alpha = alpha, inherit.aes = FALSE
+    ) +
+    ggplot2::scale_fill_manual("Player (Voronoi)", values = pal_players, drop = FALSE) +
+    ggplot2::coord_sf(default_crs = sf::NA_crs_, expand = FALSE, xlim = xlim, ylim = ylim)
+}
+
+# 3) Convenience: build (for a frame) + overlay; optionally append " (frame X)" to title
+nfl_add_voronoi <- function(
+    p,
+    df_tracks,
+    frame,
+    fill_by      = c("team","player","none"),
+    team_side    = c("both","offense","defense"),
+    alpha        = 0.30,
+    border_color = "white",
+    border_size  = 0.3,
+    team_colors  = c(Offense = "#1565C0", Defense = "#EF5350", Unknown = "#9E9E9E"),
+    player_palette = NULL,
+    xlim = c(0, 120),
+    ylim = c(0, 53.3),
+    append_frame_in_title = TRUE
+){
+  fill_by   <- match.arg(fill_by)
+  team_side <- match.arg(team_side)
+
+  vor_sf <- nfl_build_voronoi(
+    df_tracks  = df_tracks,
+    frame      = frame,
+    field_xlim = xlim,
+    field_ylim = ylim,
+    team_side  = team_side
+  )
+
+  # Append "(frame N)" once
+  if (append_frame_in_title) {
+    cur_title <- ggplot2::ggplot_build(p)$plot$labels$title
+    if (is.null(cur_title) || !nzchar(cur_title)) cur_title <- ""
+    tag <- sprintf(" (frame %d)", frame)
+    if (!grepl("\\(frame \\d+\\)$", cur_title)) {
+      p <- p + ggplot2::labs(title = paste0(cur_title, tag))
+    }
+  }
+
+  nfl_add_voronoi_sf(
+    p, vor_sf,
+    fill_by        = fill_by,
+    alpha          = alpha,
+    border_color   = border_color,
+    border_size    = border_size,
+    team_colors    = team_colors,
+    player_palette = player_palette,
+    xlim = xlim, ylim = ylim
   )
 }
