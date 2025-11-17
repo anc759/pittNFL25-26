@@ -854,3 +854,43 @@ nfl_add_voronoi <- function(
     xlim = xlim, ylim = ylim
   )
 }
+
+
+
+# Adds speed and acceleration columns to the output dataset for easy merging        
+speed_acceleration <- function(
+    data,
+    fps        = 10, # this is the standard fps used in NFL data (I think)
+    group_cols = c("game_id", "play_id", "nfl_id"),
+    x_col      = "x",
+    y_col      = "y",
+    speed_col  = "s",   # name for speed column (to match that of input data)
+    accel_col  = "a"    # name for acceleration column
+) {
+  # time step between frames
+  dt <- 1 / fps
+
+  # symbols for tidy evaluation
+  x_sym      <- rlang::sym(x_col)
+  y_sym      <- rlang::sym(y_col)
+  speed_sym  <- rlang::sym(speed_col)
+  accel_sym  <- rlang::sym(accel_col)
+
+  data %>%
+    # sort by group and frame so differences make sense
+    dplyr::arrange(dplyr::across(dplyr::all_of(c(group_cols, "frame_id")))) %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
+    dplyr::mutate(
+      # frame-to-frame displacement in yards
+      dx = !!x_sym - dplyr::lag(!!x_sym),
+      dy = !!y_sym - dplyr::lag(!!y_sym),
+
+      # speed (yards / second)
+      !!speed_sym := sqrt(dx^2 + dy^2) / dt,
+
+      # acceleration (yards / second^2) = diff(speed) / dt
+      !!accel_sym := ( !!speed_sym - dplyr::lag(!!speed_sym) ) / dt
+    ) %>%
+    dplyr::ungroup()
+}
+
