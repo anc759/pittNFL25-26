@@ -21,7 +21,6 @@ filter_by_wp <- function(meta, input, output, lower = 0.05, upper = 0.95) {
   )
 }
 
-
 # Remove plays that are near the end of a half
 filter_near_end_of_half <- function(meta, input, output, min_time_left = 30) {
   meta_with_time <- meta %>%
@@ -47,14 +46,31 @@ filter_near_end_of_half <- function(meta, input, output, min_time_left = 30) {
   )
 }
 
-nrow(meta)
-summary(meta$pre_snap_home_team_win_probability)
+filter_by_side <- function(meta, input, output, side = "Defense") {
+  input_filtered <- input %>%
+    dplyr::filter(player_side == side)
+  keys <- input_filtered %>%
+    dplyr::select(game_id, play_id, nfl_id) %>%
+    dplyr::distinct()
+  output_filtered <- output %>%
+    dplyr::inner_join(keys, by = c("game_id", "play_id", "nfl_id"))
+  list(
+    meta = meta,
+    input = input_filtered,
+    output = output_filtered
+  )
+}
 
-out <- filter_by_wp(meta, week1I, week1O)
 
-summary(out$meta$pre_snap_home_team_win_probability)
-nrow(out$meta)
 
-out <- filter_near_end_of_half(out$meta, out$input, out$output)
+#nrow(meta)
+#summary(meta$pre_snap_home_team_win_probability)
 
-nrow(out$meta)
+#out <- filter_by_wp(meta, week1I, week1O)
+
+#summary(out$meta$pre_snap_home_team_win_probability)
+#nrow(out$meta)
+
+#out <- filter_near_end_of_half(out$meta, out$input, out$output)
+
+#nrow(out$meta)
