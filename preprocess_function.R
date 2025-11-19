@@ -40,7 +40,7 @@ data_preprocess <- function(input, output) {
   # Join the clean outcomes directly to the processed input
   final <- input_processed %>%
     left_join(outcomes_clean, by = c("game_id", "play_id", "nfl_id")) %>%
-    select(game_id, play_id, nfl_id, frame_id, s, a, 
+    select(game_id, play_id, nfl_id, frame_id, player_name, player_side, x,y,ball_land_x, ball_land_y, s, a,
            distFromBallLand, corrected_o, corrected_dir, inCircleOutcome)
   
   return(na.omit(final))

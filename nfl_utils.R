@@ -894,3 +894,90 @@ speed_acceleration <- function(
     dplyr::ungroup()
 }
 
+
+
+# Code to plot field and probs basd on randomly sampled game and play id.
+# Requires input and output gameplay data.
+# Requires fitted XGBoost models fit.in and fit.out.
+plot_random_field_and_probs <- function(input, output, fit.in, fit.out){
+
+# Select random game id and play id
+game_id_rand <- output %>% select(game_id) %>% unname() %>% unlist() %>%  as.vector() %>% unique()  %>% sample(1)
+play_id_rand <- output %>% filter(game_id == game_id_rand) %>% select(play_id) %>%
+  unname() %>% unlist() %>% as.vector() %>% unique() %>% sample(1)
+
+# Get field plot
+tracks <- input  %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand)
+outs   <- output %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand)
+land   <- tracks %>% dplyr::distinct(game_id == game_id_rand, play_id == play_id_rand, ball_land_x, ball_land_y)
+  
+p_field <- plot_play_tracks_enhanced(
+  df_tracks = tracks,
+  df_land = land,
+  df_out = outs,
+  show_mode = "both",
+  throw_frame = NULL,
+  color_by = "player",
+  team_side = "both",
+  field_extent = "full"
+)
+  
+# Grab ids of players
+players_in_play <- output %>% 
+  dplyr::filter(game_id == game_id_rand, play_id == play_id_rand) %>%
+  pull(nfl_id) %>% unique()
+
+plot_player_probs <- function(player_id) {
+  input_sub <- input %>%
+    dplyr::filter(
+      nfl_id == player_id,
+      game_id == game_id_rand,
+      play_id == play_id_rand
+    )
+  output_sub <- output %>%
+    dplyr::filter(
+      nfl_id == player_id,
+      game_id == game_id_rand,
+      play_id == play_id_rand
+    )
+  
+  # If no input or no output frames, skip
+  if (nrow(input_sub) == 0 | nrow(output_sub) == 0) return(NULL)
+
+  # Predictions
+  X.in.sub  <- input_sub[,  c("s", "a", "distFromBallLand", "corrected_o", "corrected_dir")]
+  pred_in   <- predict_model(fit.in,  X.in.sub)$prob
+
+  X.out.sub <- output_sub[, c("s", "a", "distFromBallLand")]
+  pred_out  <- predict_model(fit.out, X.out.sub)$prob
+
+  player_name <- unique(input_sub$player_name)
+  outcome <- unique(input_sub$inCircleOutcome)
+
+  # Combine
+  plot_df <- rbind(
+    data.frame(frame_id = input_sub$frame_id,  pred = pred_in,  model = "fit.in"),
+    data.frame(frame_id = output_sub$frame_id, pred = pred_out, model = "fit.out")
+  ) %>% arrange(frame_id)
+
+  split_frame <- max(input_sub$frame_id)
+
+  # ggplot panel
+  return(ggplot(plot_df, aes(x = frame_id, y = pred, color = model)) +
+    geom_line() +
+    geom_point(size = 1.8) +
+    geom_vline(xintercept = split_frame, linetype = "dashed") +
+    labs(
+      title = paste0(player_name, " (", outcome, ")"),
+      x = "Frame ID", y = "Pred Prob"
+    ) +
+    theme_minimal(base_size = 11) +
+    scale_y_continuous(limits = c(0,1)) +
+    scale_color_manual(values = c("fit.in" = "blue", "fit.out" = "red")))
+}
+
+  prob_plots <- lapply(players_in_play, plot_player_probs)
+  prob_plots <- prob_plots[!sapply(prob_plots, is.null)]  # remove empty
+  prob_grid <- wrap_plots(prob_plots, ncol = 2)
+  return (p_field / prob_grid + plot_layout(heights = c(1.5, 2)))
+}
