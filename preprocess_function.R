@@ -1,4 +1,4 @@
-# Version 3: This version adds 3 variables, frames_until_throw (frames in input dataset remaining until the ball is thrown) max_output_frame (number of frames between ball thrown and end of play) InCircleOutcome_new this is our new outcome for if the defender either reached within two yards of the ball alnding or if they were within two yards of the targeted receiver at the point when the ball landed
+# Version 4: Fixed it lol, the filtering out of offensive players is done at the end of the function so do not do it in the filtering step. (need some info on offensive players to compute things.)
 #
 # Takes in the input and output datasets and then creates the outcome variable and processes the orientation and direction variables to be relative to the ball. Only returns data for input dataset and the outcome.
 #
@@ -63,8 +63,8 @@ data_preprocess <- function(input, output) {
     ungroup() %>%
     left_join(target_locs, by = c("game_id", "play_id", "frame_id")) %>%
     mutate(
-      distToTarget = sqrt((x - target_x)^2 + (y - target_y)^2),
-      min_distance = pmin(distToTarget, distFromBallLand)
+      distToTarget = sqrt((x - target_x)^2 + (y - target_y)^2)
+      #,min_distance = pmin(distToTarget, distFromBallLand)
     )
   
   # Process orientation and direction
@@ -78,8 +78,7 @@ data_preprocess <- function(input, output) {
            ball_land_x, ball_land_y, s, a,
            distFromBallLand, corrected_o, corrected_dir, 
            inCircleOutcome, frames_until_throw, max_output_frame, 
-           inCircleOutcome_new) # Included min_distance from step 3
-  
+           inCircleOutcome_new,player_role,distToTarget) # Included min_distance from step 3
+  final <- final[final$player_role != "Targeted Receiver",]
   return(na.omit(final))
 }
-
