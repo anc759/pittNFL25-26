@@ -1,4 +1,4 @@
-# Version 2: This version adds 4 variables, frames_until_throw (frames in input dataset remaining until the ball is thrown) max_output_frame (number of frames between ball thrown and end of play) distToTarget (distance to targeted receiver) final_response (min of distance to targeted receiver and distance to ball landing location)
+# Version 3: This version adds 3 variables, frames_until_throw (frames in input dataset remaining until the ball is thrown) max_output_frame (number of frames between ball thrown and end of play) InCircleOutcome_new this is our new outcome for if the defender either reached within two yards of the ball alnding or if they were within two yards of the targeted receiver at the point when the ball landed
 #
 # Takes in the input and output datasets and then creates the outcome variable and processes the orientation and direction variables to be relative to the ball. Only returns data for input dataset and the outcome.
 #
