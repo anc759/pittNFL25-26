@@ -114,4 +114,44 @@ process_o <- function(input){
   # Assuming angle_difference is vectorized
   return(angle_difference(input$o, theta))
 }
+#two new helper functions for processing angle difference between player and targeted receiver
+process_dir_tr <- function(input){
+  x_abs <- abs(input$x - input$target_x)
+  y_abs <- abs(input$y - input$target_y)
+  
+  # Use mapply to iterate over x_abs and y_abs in parallel
+  # The anonymous function(x, y) is called for each pair:
+  # 1. principal_angle(c(1,0), c(x_abs[1], y_abs[1]))
+  # 2. principal_angle(c(1,0), c(x_abs[2], y_abs[2]))
+  # ...and so on.
+  theta_rad_vector <- mapply(function(x, y) {
+    principal_angle(c(1, 0), c(x, y))
+  }, x_abs, y_abs)
+  
+  # Assuming process_angle is vectorized (it can take a vector)
+  theta <- process_angle(input$x,input$target_x,theta_rad_vector)
+  
+  # Assuming angle_difference is vectorized
+  return(angle_difference(input$dir, theta))
+}
+
+process_o_tr <- function(input){
+  x_abs <- abs(input$x - input$target_x)
+  y_abs <- abs(input$y - input$target_y)
+  
+  # Use mapply to iterate over x_abs and y_abs in parallel
+  # The anonymous function(x, y) is called for each pair:
+  # 1. principal_angle(c(1,0), c(x_abs[1], y_abs[1]))
+  # 2. principal_angle(c(1,0), c(x_abs[2], y_abs[2]))
+  # ...and so on.
+  theta_rad_vector <- mapply(function(x, y) {
+    principal_angle(c(1, 0), c(x, y))
+  }, x_abs, y_abs)
+  
+  # Assuming process_angle is vectorized (it can take a vector)
+  theta <- process_angle(input$x,input$target_x,theta_rad_vector)
+  
+  # Assuming angle_difference is vectorized
+  return(angle_difference(input$o, theta))
+}
 
