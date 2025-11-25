@@ -1,6 +1,7 @@
-# Version 4: Fixed it lol, the filtering out of offensive players is done at the end of the function so do not do it in the filtering step. (need some info on offensive players to compute things.)
+# Version 5: Added the orientation and direction variables relative to tageted receiver.
 #
 # Takes in the input and output datasets and then creates the outcome variable and processes the orientation and direction variables to be relative to the ball. Only returns data for input dataset and the outcome.
+#
 #
 #
 
@@ -71,12 +72,15 @@ data_preprocess <- function(input, output) {
   input_processed$corrected_o <- process_o(input_processed)
   input_processed$corrected_dir <- process_dir(input_processed)
   
+  input_processed$corrected_o_tr <- process_o_tr(input_processed)
+  input_processed$corrected_dir_tr <- process_dir(input_processed)
+  
   # --- 4. Final Join ---
   final <- input_processed %>%
     left_join(outcomes_clean, by = c("game_id", "play_id", "nfl_id")) %>%
     select(game_id, play_id, nfl_id, frame_id, player_name, player_side, x, y, 
            ball_land_x, ball_land_y, s, a,
-           distFromBallLand, corrected_o, corrected_dir, 
+           distFromBallLand, corrected_o, corrected_dir,corrected_o_tr, corrected_dir_tr, 
            inCircleOutcome, frames_until_throw, max_output_frame, 
            inCircleOutcome_new,player_role,distToTarget) # Included min_distance from step 3
   final <- final[final$player_role != "Targeted Receiver",]
