@@ -899,7 +899,13 @@ speed_acceleration <- function(
 # Code to plot field and probs basd on randomly sampled game and play id.
 # Requires input and output gameplay data.
 # Requires fitted XGBoost models fit.in and fit.out.
-plot_random_field_and_probs <- function(input, output, fit.in, fit.out){
+plot_random_field_and_probs <- function(input,
+                                        output,
+                                        input.features,
+                                        output.features,
+                                        input.y,
+                                        fit.in,
+                                        fit.out){
 
 # Select random game id and play id
 game_id_rand <- output %>% select(game_id) %>% unname() %>% unlist() %>%  as.vector() %>% unique()  %>% sample(1)
@@ -945,14 +951,15 @@ plot_player_probs <- function(player_id) {
   if (nrow(input_sub) == 0 | nrow(output_sub) == 0) return(NULL)
 
   # Predictions
-  X.in.sub  <- input_sub[,  c("s", "a", "distFromBallLand", "corrected_o", "corrected_dir")]
+  X.in.sub  <- input_sub[,  input.features]
   pred_in   <- predict_model(fit.in,  X.in.sub)$prob
 
-  X.out.sub <- output_sub[, c("s", "a", "distFromBallLand")]
+  X.out.sub <- output_sub[, output.features]
   pred_out  <- predict_model(fit.out, X.out.sub)$prob
 
   player_name <- unique(input_sub$player_name)
-  outcome <- unique(input_sub$inCircleOutcome)
+  
+  outcome <- unique(input_sub[, input.y])
 
   # Combine
   plot_df <- rbind(
