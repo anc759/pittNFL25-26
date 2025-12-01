@@ -14,7 +14,7 @@ fit_binary_classifier <- function(model_name, X, Y, ...) {
     if (!requireNamespace("xgboost", quietly = TRUE))
       stop("Please install the 'xgboost' package.")
     dtrain <- xgboost::xgb.DMatrix(data = as.matrix(X), label = Y)
-    fit <- xgboost::xgb.train(data = dtrain, ...)
+    fit <- xgboost::xgb.train(data = dtrain, objective = 'binary:logistic', ...)
     
   } else stop("Unsupported model type: ", model_name)
   fit
