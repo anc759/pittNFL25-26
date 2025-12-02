@@ -1,4 +1,4 @@
-# ============================================================================
+]# ============================================================================
 # NFL Big Data Bowl — plotting utilities
 # Requires: dplyr, ggplot2; optional: ggrepel (for end labels)
 # ============================================================================
@@ -912,6 +912,9 @@ game_id_rand <- output %>% select(game_id) %>% unname() %>% unlist() %>%  as.vec
 play_id_rand <- output %>% filter(game_id == game_id_rand) %>% select(play_id) %>%
   unname() %>% unlist() %>% as.vector() %>% unique() %>% sample(1)
 
+#game_id_rand <- 2023091702
+#play_id_rand <- 2842
+
 # Get field plot
 tracks <- input  %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand)
 outs   <- output %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand)
@@ -968,7 +971,7 @@ plot_player_probs <- function(player_id) {
   ) %>% arrange(frame_id)
 
   split_frame <- max(input_sub$frame_id)
-
+  
   # ggplot panel
   return(ggplot(plot_df, aes(x = frame_id, y = pred, color = model)) +
     geom_line() +
@@ -987,4 +990,312 @@ plot_player_probs <- function(player_id) {
   prob_plots <- prob_plots[!sapply(prob_plots, is.null)]  # remove empty
   prob_grid <- wrap_plots(prob_plots, ncol = 2)
   return (p_field / prob_grid + plot_layout(heights = c(1.5, 2)))
+}
+
+
+# Functions for filtering the data
+#####################################
+
+# Filter based on win probability
+filter_by_wp <- function(meta, input, lower = 0.05, upper = 0.95) {
+  meta_filtered <- meta %>%
+    filter(
+      pre_snap_home_team_win_probability > lower &
+      pre_snap_home_team_win_probability < upper
+    )
+
+  input_filtered <- input %>%
+    semi_join(meta_filtered, by = c("game_id", "play_id"))
+ return(input_filtered)
+}
+
+# Remove plays that are near the end of a half
+filter_near_end_of_half <- function(meta, input, min_time_left = 30) {
+  meta_with_time <- meta %>%
+    mutate(
+      time_left_qtr = as.numeric(substr(game_clock, 1, 2)) * 60 +
+                      as.numeric(substr(game_clock, 4, 5)),
+      time_left_half = case_when(
+        quarter %in% c(1, 3) ~ time_left_qtr + 900,
+        TRUE ~ time_left_qtr
+      )
+    )
+  meta_filtered <- meta_with_time %>%
+    filter(time_left_half > min_time_left)
+  input_filtered <- input %>%
+    semi_join(meta_filtered, by = c("game_id", "play_id"))
+  return(input_filtered)
+}
+
+# Functions for computing features
+#####################################
+
+#
+#
+# HELPER FUNCTIONS FOR PROCESSING ORIENTATION AND DIRECTION
+#
+#
+rad2deg <- function(rad) {
+  return(rad * 180 / pi)
+}
+
+principal_angle <- function(v1, v2) {
+  # Calculate the norms (magnitudes) of the vectors
+  # Note: R's norm() function is for matrices,
+  # so we use sqrt(sum(v^2)) or sqrt(v %*% v)
+  norm_v1 <- sqrt(sum(v1^2))
+  norm_v2 <- sqrt(sum(v2^2))
+  
+  # Handle the case of zero vectors to avoid division by zero
+  if (norm_v1 == 0 || norm_v2 == 0) {
+    # The angle is undefined if one vector is zero,
+    # but we return 0.0 as a convention.
+    return(0.0)
+  }
+  
+  # Calculate the dot product
+  # In R, the dot product is v1 %*% v2
+  dot_product <- v1 %*% v2
+  
+  # Calculate the cosine of the angle
+  cos_theta <- dot_product / (norm_v1 * norm_v2)
+  
+  # We clip the value to the range [-1.0, 1.0] to avoid
+  # numerical errors (e.g., getting 1.0000001) that
+  # would cause acos() to return NaN.
+  # We use pmin and pmax for element-wise min/max
+  cos_theta_clipped <- pmin(pmax(cos_theta, -1.0), 1.0)
+  
+  # Calculate the angle in radians using the arccosine
+  # acos() returns the angle
+  angle_rad <- acos(cos_theta_clipped)
+  # The result of acos() might be a 1x1 matrix,
+  # so we convert it to a simple numeric value
+  return(rad2deg(as.numeric(angle_rad)))
+}
+
+process_angle <- function(x, ball_land_x, angle) {
+  
+  # ifelse() is the vectorized version of if-else.
+  # It will check the condition (x > ball_land_x) for every element
+  # and return the corresponding element from either (angle + 180) or (angle).
+  
+  result <- ifelse(x > ball_land_x, angle + 180, angle)
+  
+  return(result)
+  
+  # take the difference between angles and make sure its 180 degree calculated
+}
+
+angle_difference <- function(input_angle, angle_to_ball) {
+  
+  # 1. Calculate the absolute difference for all elements at once
+  return_angle <- abs(input_angle - angle_to_ball)
+  
+  # 2. Use ifelse() to check the condition for every element
+  # If return_angle > 180, use (360 - return_angle)
+  # Otherwise, just use return_angle
+  result <- ifelse(return_angle > 180, 360 - return_angle, return_angle)
+  
+  return(result)
+}
+
+#
+#
+# HERE ARE THE FUNCTIONS TO ACTUALLY PROCESS THE O AND DIR VARIABLES FOR THE INPUT DATASET. JUST PUT IN THE INPUT DATASET AND IT RETURNS
+# THE FIXED DIR AND 0 VARIABLES REPECTIVELY.
+#
+#
+
+process_dir <- function(input){
+  x_abs <- abs(input$x - input$ball_land_x)
+  y_abs <- abs(input$y - input$ball_land_y)
+  
+  # Use mapply to iterate over x_abs and y_abs in parallel
+  # The anonymous function(x, y) is called for each pair:
+  # 1. principal_angle(c(1,0), c(x_abs[1], y_abs[1]))
+  # 2. principal_angle(c(1,0), c(x_abs[2], y_abs[2]))
+  # ...and so on.
+  theta_rad_vector <- mapply(function(x, y) {
+    principal_angle(c(1, 0), c(x, y))
+  }, x_abs, y_abs)
+  
+  # Assuming process_angle is vectorized (it can take a vector)
+  theta <- process_angle(input$x,input$ball_land_x,theta_rad_vector)
+  
+  # Assuming angle_difference is vectorized
+  return(angle_difference(input$dir, theta))
+}
+
+process_o <- function(input){
+  x_abs <- abs(input$x - input$ball_land_x)
+  y_abs <- abs(input$y - input$ball_land_y)
+  
+  # Use mapply to iterate over x_abs and y_abs in parallel
+  # The anonymous function(x, y) is called for each pair:
+  # 1. principal_angle(c(1,0), c(x_abs[1], y_abs[1]))
+  # 2. principal_angle(c(1,0), c(x_abs[2], y_abs[2]))
+  # ...and so on.
+  theta_rad_vector <- mapply(function(x, y) {
+    principal_angle(c(1, 0), c(x, y))
+  }, x_abs, y_abs)
+  
+  # Assuming process_angle is vectorized (it can take a vector)
+  theta <- process_angle(input$x,input$ball_land_x,theta_rad_vector)
+  
+  # Assuming angle_difference is vectorized
+  return(angle_difference(input$o, theta))
+}
+#two new helper functions for processing angle difference between player and targeted receiver
+process_dir_tr <- function(input){
+  x_abs <- abs(input$x - input$target_x)
+  y_abs <- abs(input$y - input$target_y)
+  
+  # Use mapply to iterate over x_abs and y_abs in parallel
+  # The anonymous function(x, y) is called for each pair:
+  # 1. principal_angle(c(1,0), c(x_abs[1], y_abs[1]))
+  # 2. principal_angle(c(1,0), c(x_abs[2], y_abs[2]))
+  # ...and so on.
+  theta_rad_vector <- mapply(function(x, y) {
+    principal_angle(c(1, 0), c(x, y))
+  }, x_abs, y_abs)
+  
+  # Assuming process_angle is vectorized (it can take a vector)
+  theta <- process_angle(input$x,input$target_x,theta_rad_vector)
+  
+  # Assuming angle_difference is vectorized
+  return(angle_difference(input$dir, theta))
+}
+
+process_o_tr <- function(input){
+  x_abs <- abs(input$x - input$target_x)
+  y_abs <- abs(input$y - input$target_y)
+  
+  # Use mapply to iterate over x_abs and y_abs in parallel
+  # The anonymous function(x, y) is called for each pair:
+  # 1. principal_angle(c(1,0), c(x_abs[1], y_abs[1]))
+  # 2. principal_angle(c(1,0), c(x_abs[2], y_abs[2]))
+  # ...and so on.
+  theta_rad_vector <- mapply(function(x, y) {
+    principal_angle(c(1, 0), c(x, y))
+  }, x_abs, y_abs)
+  
+  # Assuming process_angle is vectorized (it can take a vector)
+  theta <- process_angle(input$x,input$target_x,theta_rad_vector)
+  
+  # Assuming angle_difference is vectorized
+  return(angle_difference(input$o, theta))
+}
+
+
+# Functions for processing the data
+#####################################
+merge_and_process_data <- function(meta, input, output) {
+
+  # Merge dataframes
+  # ----------------------------------
+
+  # Add missing features to output rows
+  input_filtered <- input %>%
+    select('game_id', 'play_id', 'nfl_id', 'play_direction', 'absolute_yardline_number',
+           'player_name', 'player_side', 'player_role', 'num_frames_output',
+           'ball_land_x','ball_land_y') %>%
+    distinct()
+  output_mod <- output %>%
+    left_join(input_filtered, by = c("game_id", "play_id", "nfl_id"))
+  output_mod <-  speed_acceleration(data = output_mod)
+  output_mod <- output_mod %>% select(-dx, -dy)
+
+  # TODO: Add estimated direction to output
+
+  # Remove input data that does not show up in output data
+  input_mod <- input %>%
+    semi_join(output, by = c("game_id", "play_id", "nfl_id"))
+
+  # Combine data into a total dataframe
+  input_mod$output <- FALSE
+  output_mod$output <- TRUE
+  df <- input_mod %>% bind_rows(output_mod)
+
+  # Filter plays
+  # -----------------------------------------
+
+  # Remove low win probability plays
+  df  <- filter_by_wp(meta, df)
+
+  # Remove plays that occur near end of half
+  df  <- filter_near_end_of_half(meta, df)
+
+  # Add outcomes
+  # -------------------------------------------
+
+  # Get targeted reciever locations
+  target_locs <- df %>%
+    filter(player_role == "Targeted Receiver") %>%
+    select(game_id, play_id, frame_id, target_x = x, target_y = y) %>%
+    distinct()
+
+  # Get targeted reciever final locations
+  target_final_locs <- df %>%
+    filter(player_role == "Targeted Receiver") %>%
+    group_by(game_id, play_id) %>%
+    slice_max(frame_id) %>%
+    ungroup() %>%
+    select(game_id, play_id, target_final_x = x, target_final_y = y)
+
+  # Compute outcomes
+  outcomes <- df %>%
+    group_by(game_id, play_id, nfl_id) %>%
+    slice_max(frame_id) %>%
+    ungroup() %>%
+    left_join(target_final_locs, by = c("game_id", "play_id")) %>%
+    mutate(
+      distFromBallLand = sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2),
+      distToTargetFinal = sqrt((x - target_final_x)^2 + (y - target_final_y)^2),
+      inBallCircle = distFromBallLand <= 2,
+      inBallTRCircle = distFromBallLand <= 2 | distToTargetFinal <= 2
+    ) %>% select(game_id, play_id, nfl_id, inBallCircle, inBallTRCircle)
+
+  # Add Response
+  df <- df %>%
+    left_join(outcomes, by = c("game_id", "play_id", "nfl_id"))
+
+  # Filter by Player Positions
+  # ----------------------------------------------
+
+  # Only consider specific player positions
+  positions <- c("CB", "FS")
+  df <- df %>% filter(player_position %in% positions)
+
+  # Add Features
+  # ----------------------------------------------
+
+  # Add distance to ball and targeted reciever
+  df <- df %>%
+    left_join(target_locs, by = c("game_id", "play_id", "frame_id")) %>%
+    mutate(
+      distFromBallLand = sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2),
+      distToTarget = sqrt((x - target_x)^2 + (y - target_y)^2),
+      )
+
+  # Add features based on number of frames; frames_until_throw, frames_until_ball_land
+  df <- df %>%
+    group_by(game_id, play_id) %>%
+    mutate(
+      max_input_frame  = max(frame_id[output == FALSE]),
+      max_output_frame = max(frame_id[output == TRUE]),
+      frames_until_throw = ifelse(
+        output == FALSE,
+        max_input_frame - frame_id,
+        0
+      ),
+      frames_until_ball_land = max_output_frame - frame_id)  %>%
+    ungroup() %>%
+    select(-max_input_frame, -max_output_frame)
+
+  # Add relative direction
+  df$corrected_dir <- process_dir(df)
+  df$corrected_dir_tr <- process_dir(df)
+
+  return(df)
 }
