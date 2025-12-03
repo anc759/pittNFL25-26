@@ -1,4 +1,4 @@
-]# ============================================================================
+# ============================================================================
 # NFL Big Data Bowl — plotting utilities
 # Requires: dplyr, ggplot2; optional: ggrepel (for end labels)
 # ============================================================================
@@ -895,102 +895,81 @@ speed_acceleration <- function(
 }
 
 
-
 # Code to plot field and probs basd on randomly sampled game and play id.
 # Requires input and output gameplay data.
-# Requires fitted XGBoost models fit.in and fit.out.
-plot_random_field_and_probs <- function(input,
-                                        output,
-                                        input.features,
-                                        output.features,
-                                        input.y,
-                                        fit.in,
-                                        fit.out){
+plot_field_and_probs <- function(df,
+                                 features,
+                                 response,
+                                 fit,
+                                 game_id = NULL,
+                                 play_id = NULL){
 
-# Select random game id and play id
-game_id_rand <- output %>% select(game_id) %>% unname() %>% unlist() %>%  as.vector() %>% unique()  %>% sample(1)
-play_id_rand <- output %>% filter(game_id == game_id_rand) %>% select(play_id) %>%
-  unname() %>% unlist() %>% as.vector() %>% unique() %>% sample(1)
-
-#game_id_rand <- 2023091702
-#play_id_rand <- 2842
-
-# Get field plot
-tracks <- input  %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand)
-outs   <- output %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand)
-land   <- tracks %>% dplyr::distinct(game_id == game_id_rand, play_id == play_id_rand, ball_land_x, ball_land_y)
+  game_id_rand <- game_id
+  play_id_rand <- play_id
   
-p_field <- plot_play_tracks_enhanced(
-  df_tracks = tracks,
-  df_land = land,
-  df_out = outs,
-  show_mode = "both",
-  throw_frame = NULL,
-  color_by = "player",
-  team_side = "both",
-  field_extent = "full"
-)
+  if (is.null(game_id) || is.null(play_id)) {
+    # Select random game id and play id
+    game_id_rand <- df %>% select(game_id) %>% unname() %>% unlist() %>%  as.vector() %>% unique()  %>% sample(1)
+    play_id_rand <- df %>% filter(game_id == game_id_rand) %>% select(play_id) %>%
+      unname() %>% unlist() %>% as.vector() %>% unique() %>% sample(1)
+  }
+
+  # Get field plot
+  tracks <- df  %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand, output == FALSE)
+  outs   <- df %>% dplyr::filter(game_id == game_id_rand, play_id == play_id_rand, output == TRUE)
+  land   <- tracks %>% dplyr::distinct(game_id == game_id_rand, play_id == play_id_rand, ball_land_x, ball_land_y)
   
-# Grab ids of players
-players_in_play <- output %>% 
-  dplyr::filter(game_id == game_id_rand, play_id == play_id_rand) %>%
-  pull(nfl_id) %>% unique()
-
-plot_player_probs <- function(player_id) {
-  input_sub <- input %>%
-    dplyr::filter(
-      nfl_id == player_id,
-      game_id == game_id_rand,
-      play_id == play_id_rand
-    )
-  output_sub <- output %>%
-    dplyr::filter(
-      nfl_id == player_id,
-      game_id == game_id_rand,
-      play_id == play_id_rand
-    )
+  p_field <- plot_play_tracks_enhanced(
+    df_tracks = tracks,
+    df_land = land,
+    df_out = outs,
+    show_mode = "both",
+    throw_frame = NULL,
+    color_by = "player",
+    team_side = "both",
+    field_extent = "full"
+  )
   
-  # If no input or no output frames, skip
-  if (nrow(input_sub) == 0 | nrow(output_sub) == 0) return(NULL)
+  # Grab ids of players
+  players_in_play <- df %>% 
+    dplyr::filter(game_id == game_id_rand, play_id == play_id_rand) %>%
+    pull(nfl_id) %>% unique()
 
-  # Predictions
-  X.in.sub  <- input_sub[,  input.features]
-  pred_in   <- predict_model(fit.in,  X.in.sub)$prob
+  plot_player_probs <- function(player_id) {
+    df_sub <- df %>%
+      dplyr::filter(
+        nfl_id == player_id,
+        game_id == game_id_rand,
+        play_id == play_id_rand
+      )
 
-  X.out.sub <- output_sub[, output.features]
-  pred_out  <- predict_model(fit.out, X.out.sub)$prob
+    X.sub <- df_sub[, features]
+    preds <- predict_model(fit, X.sub)$prob
+    player_name <- unique(df_sub$player_name)
+    outcome <- unique(df_sub[, response])
 
-  player_name <- unique(input_sub$player_name)
-  
-  outcome <- unique(input_sub[, input.y])
-
-  # Combine
-  plot_df <- rbind(
-    data.frame(frame_id = input_sub$frame_id,  pred = pred_in,  model = "fit.in"),
-    data.frame(frame_id = output_sub$frame_id, pred = pred_out, model = "fit.out")
-  ) %>% arrange(frame_id)
-
-  split_frame <- max(input_sub$frame_id)
-  
-  # ggplot panel
-  return(ggplot(plot_df, aes(x = frame_id, y = pred, color = model)) +
-    geom_line() +
-    geom_point(size = 1.8) +
-    geom_vline(xintercept = split_frame, linetype = "dashed") +
-    labs(
-      title = paste0(player_name, " (", outcome, ")"),
-      x = "Frame ID", y = "Pred Prob"
-    ) +
-    theme_minimal(base_size = 11) +
-    scale_y_continuous(limits = c(0,1)) +
-    scale_color_manual(values = c("fit.in" = "blue", "fit.out" = "red")))
-}
+    plot_df <- data.frame(frame_id = df_sub$frame_id,  pred = preds) %>% arrange(frame_id)
+    split_frame <- max(df_sub$frame_id[df_sub$output == FALSE])
+    
+    # ggplot panel
+    return(ggplot(plot_df, aes(x = frame_id, y = pred)) +
+             geom_line() +
+             geom_point(size = 1.8) +
+             geom_vline(xintercept = split_frame, linetype = "dashed") +
+             labs(
+               title = paste0(player_name, " (", outcome, ")"),
+               x = "Frame ID", y = "Pred Prob"
+             ) +
+             theme_minimal(base_size = 11) +
+             scale_y_continuous(limits = c(0,1)))
+  }
 
   prob_plots <- lapply(players_in_play, plot_player_probs)
   prob_plots <- prob_plots[!sapply(prob_plots, is.null)]  # remove empty
   prob_grid <- wrap_plots(prob_plots, ncol = 2)
-  return (p_field / prob_grid + plot_layout(heights = c(1.5, 2)))
+  return(p_field / prob_grid + plot_layout(heights = c(1.5, 2)))
 }
+
 
 
 # Functions for filtering the data
@@ -1187,6 +1166,22 @@ process_o_tr <- function(input){
   return(angle_difference(input$o, theta))
 }
 
+# For merging input and output data
+merge_data <- function(input, output) {
+  input_filtered <- input %>%
+    select('game_id', 'play_id', 'nfl_id', 'play_direction', 'absolute_yardline_number',
+           'player_name', 'player_side', 'player_role', 'num_frames_output',
+           'ball_land_x','ball_land_y') %>%
+    distinct()
+  output_mod <- output %>%
+    left_join(input_filtered, by = c("game_id", "play_id", "nfl_id"))
+  output_mod <-  speed_acceleration(data = output_mod)
+  output_mod <- output_mod %>% select(-dx, -dy)
+  input$output <- FALSE
+  output_mod$output <- TRUE
+  df <- input %>% bind_rows(output_mod)
+  return(df)
+}
 
 # Functions for processing the data
 #####################################
@@ -1194,8 +1189,28 @@ merge_and_process_data <- function(meta, input, output) {
 
   # Merge dataframes
   # ----------------------------------
+  input_filtered <- input %>%
+    select('game_id', 'play_id', 'nfl_id', 'play_direction', 'absolute_yardline_number',
+           'player_name', 'player_side', 'player_role', 'num_frames_output',
+           'ball_land_x','ball_land_y') %>%
+    distinct()
+  output_mod <- output %>%
+    left_join(input_filtered, by = c("game_id", "play_id", "nfl_id"))
+  output_mod <-  speed_acceleration(data = output_mod)
+  output_mod <- output_mod %>% select(-dx, -dy)
 
-  # Add missing features to output rows
+  # TODO: Add estimated direction to output
+
+  # Remove input data that does not show up in output data
+  input_mod <- input %>%
+    semi_join(output, by = c("game_id", "play_id", "nfl_id"))
+
+  # Combine data into a total dataframe
+  input_mod$output <- FALSE
+  output_mod$output <- TRUE
+  df <- input_mod %>% bind_rows(output_mod)
+
+    # Add missing features to output rows
   input_filtered <- input %>%
     select('game_id', 'play_id', 'nfl_id', 'play_direction', 'absolute_yardline_number',
            'player_name', 'player_side', 'player_role', 'num_frames_output',
@@ -1298,4 +1313,161 @@ merge_and_process_data <- function(meta, input, output) {
   df$corrected_dir_tr <- process_dir(df)
 
   return(df)
+}
+
+
+# For plotting gif of probabilites and play. Needs df with prob column and play information.
+generate_gif_of_probs_and_play <- function(df, GAMEID, PLAYID){
+
+  example.play <- df %>%
+    filter(game_id == GAMEID, play_id == PLAYID) %>%
+    arrange(frame_id)
+
+  prob_players <- example.play %>%
+    filter(!is.na(prob)) %>%
+    distinct(nfl_id, player_name)
+
+  player_colors <- setNames(
+    hue_pal()(nrow(prob_players)),
+    prob_players$nfl_id
+  )
+
+  example.play <- example.play %>%
+    left_join(
+      data.frame(
+        nfl_id = as.numeric(names(player_colors)),
+        prob_color = as.character(player_colors)
+      ),
+      by = "nfl_id"
+    )
+
+  player_labels <- example.play %>%
+    filter(!is.na(prob), frame_id == max(example.play$frame_id)) %>%
+    distinct(nfl_id, player_name, prob_color, prob) %>%
+    mutate(label_y = prob + seq_along(nfl_id) * 0.01)
+
+
+
+  example.play <- example.play %>%
+    mutate(
+      prob_color = case_when(
+        !is.na(prob_color) ~ prob_color,                                      # already has prob color
+        player_side == "Defense" ~ "#002244",                                 # blue
+        player_side == "Offense" ~ "#c60c30",                                 # red
+        TRUE ~ "gray50"                                                      # fallback
+      )
+    )
+
+  throw_frame <- min(example.play$frame_id[example.play$output == TRUE])
+
+  ball_land <- example.play %>%
+    distinct(ball_land_x, ball_land_y)
+
+  xmin <- 0
+  xmax <- 160 / 3
+
+  ymin <- max(round(min(example.play$x, na.rm = TRUE) - 10, -1), 0)
+  ymax <- min(round(max(example.play$x, na.rm = TRUE) + 10, -1), 120)
+
+  df.hash <- expand.grid(x = c(0, 23.36667, 29.96667, xmax),
+                         y = seq(10,110,1)) %>%
+    filter(!(floor(y %% 5) == 0)) %>%
+    filter(y < ymax, y > ymin)
+
+  play.plot <- ggplot() +
+    annotate("text", x = df.hash$x[df.hash$x < xmax/2],
+             y = df.hash$y[df.hash$x < xmax/2], label = "_", hjust = 0) +
+    annotate("text", x = df.hash$x[df.hash$x > xmax/2],
+             y = df.hash$y[df.hash$x > xmax/2], label = "_", hjust = 1) +
+    geom_segment(aes(x = xmin,
+                     y = seq(max(10, ymin), min(ymax, 110), by = 5),
+                     xend = xmax,
+                     yend = seq(max(10, ymin), min(ymax, 110), by = 5)),
+                 linewidth = 0.3) +
+    annotate("rect",
+             xmin = xmin, xmax = xmax,
+             ymin = ymin, ymax = ymax,
+             fill = NA, colour = "black") +
+    geom_text(data = ball_land,
+              aes(x = xmax - ball_land_y, y = ball_land_x),
+              label = "X",
+              size = 8,
+              colour = "black") +
+    geom_point(data = example.play,
+               aes(x = xmax - y, y = x,
+                   color = prob_color,
+                   group = nfl_id),
+               size = 4, alpha = 0.8) +
+    scale_color_identity() +
+    coord_fixed() +
+    ylim(ymin, ymax) +
+    theme_nothing() +
+    labs(title = "Frame {frame_time}")
+
+  prob.plot <- ggplot() +
+    geom_line(data = example.play %>% filter(!is.na(prob)),
+              aes(x = frame_id, y = prob,
+                  group = nfl_id,
+                  color = prob_color),
+              linewidth = 1) +
+    geom_vline(xintercept = throw_frame, linetype = "dashed", linewidth = 1) +
+    scale_y_continuous(limits = c(0,1)) +
+    scale_color_identity(
+      guide = "legend",
+      labels = setNames(player_labels$player_name, player_labels$prob_color),
+      breaks = player_labels$prob_color
+    ) +
+    coord_cartesian(xlim = c(min(example.play$frame_id),
+                             max(example.play$frame_id))) +
+    labs(title = paste('Game ID: ', GAMEID, 'Play ID: ', PLAYID),
+         x = "Frame",
+         y = "Probability") +
+    theme_minimal(base_size = 12) +
+    theme(
+      # The legend is now needed, so we move it
+      legend.position = c(0.2, 0.8), # Place legend inside plot area (top-left-ish)
+      legend.background = element_rect(fill = "white", color = "gray50"),
+      plot.margin = unit(c(1, 4, 1, 1), "lines") # Increase right margin for labels
+    )
+
+
+  anim_field <- play.plot + 
+    transition_time(frame_id) +
+    ease_aes('linear') +
+    theme(plot.title = element_text(hjust = 0.5)) # Center title
+  anim_prob <- prob.plot + 
+    transition_reveal(frame_id) + 
+    ease_aes('linear')
+
+  fps_val <- 10
+  nframes_val <- length(unique(example.play$frame_id))*2
+
+  field_gif <- animate(anim_field, 
+                       nframes = nframes_val, 
+                       fps = fps_val, 
+                       width = 600, 
+                       height = 600,
+                       renderer = magick_renderer())
+  prob_gif <- animate(anim_prob, 
+                      nframes = nframes_val, 
+                      fps = fps_val, 
+                      width = 400, 
+                      height = 600,
+                      renderer = magick_renderer())
+
+  combined_gif <- image_append(c(prob_gif[1], field_gif[1]))
+
+  for(i in 2:nframes_val){
+    combined <- image_append(c(prob_gif[i], field_gif[i]))
+    combined_gif <- c(combined_gif, combined)
+  }
+
+  # Pause the animation at end
+  frames_to_pause <- 30
+  last_frame <- combined_gif[length(combined_gif)]
+  for(i in 1:frames_to_pause){
+    combined_gif <- c(combined_gif, last_frame)
+  }
+
+  image_write(combined_gif, format = "gif", path = paste(GAMEID,"_",PLAYID, ".gif", sep = ''))
 }
