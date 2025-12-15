@@ -49,9 +49,6 @@ evaluate_model <- function(model, df.test, features, outcome) {
   precision <- cm$byClass["Precision"]
   recall <- cm$byClass["Recall"]
   f1 <- cm$byClass["F1"]
-  auc_val <- tryCatch({
-    pROC::roc(response = Y_test, predictor = preds_prob, quiet = TRUE)$auc
-  }, error = function(e) NA)
 
   # Earliness metrics
   df.test$yhat <- preds_factor
@@ -108,7 +105,6 @@ evaluate_model <- function(model, df.test, features, outcome) {
     pull(overall_average)
   
   c(Accuracy = acc,
-    AUC = auc_val,
     Precision = precision,
     Recall = recall,
     F1 = f1,
@@ -124,26 +120,47 @@ finetune <- function(metric,
                      features,
                      outcome,
                      param_grid,
-                     save_file) {
+                     results_save_file,
+                     model_save_file) {
 
   # Get training data
   results <- list()
+  best_metric <- 0
   X.train <- df.train[, features]
   Y.train <- df.train[[outcome]]
-  
-  for (i in seq_along(param_grid)) {
 
-    # Fit and evaluate model for each set of params
-    params <- param_grid[[i]]
-    nrounds = params$nrounds
-    params_mod <- params
-    params_mod$nrounds <- NULL
-    model <- fit_xgb_binary_classifier(nrounds, X.train, Y.train, params_mod)
-    metrics <- evaluate_model(model, df.test, features, outcome)
-    results[[i]] <- list(params = params, metrics = metrics)
+  if (!file.exists(model_save_file) | !file.exists(results_save_file)) {
 
-    saveRDS(results, file = save_file)
- 
+    message('Evaluating hyper-parameters, this may take a while')
+    total_iterations <- length(seq_along(param_grid))
+    pb <- progress_bar$new(
+      format = " Processing [:bar] :percent eta: :eta",
+      total = total_iterations,
+      clear = FALSE,
+      width = 60
+    )
+    for (i in seq_along(param_grid)) {
+      pb$tick()
+      # Fit and evaluate model for each set of params
+      params <- param_grid[[i]]
+      nrounds = params$nrounds
+      params_mod <- params
+      params_mod$nrounds <- NULL
+      model <- fit_xgb_binary_classifier(nrounds, X.train, Y.train, params_mod)
+      metrics <- evaluate_model(model, df.test, features, outcome)
+      metric_val <- metrics[[metric]]
+      if (metric_val > best_metric){
+        best_model <- model
+      }
+      results[[i]] <- list(params = params, metrics = metrics)
+
+      saveRDS(results, file = results_save_file)
+      
+    }
+
+  }
+  else {
+    results <- readRDS(results_save_file)
   }
 
   # Find best set of params based on metric
@@ -151,7 +168,10 @@ finetune <- function(metric,
   best_idx <- which.max(metric_values)
   best_params <- results[[best_idx]]$params
   
-  #best_model <- fit_binary_classifier(model_name, X.train, Y.train, best_params)
+  # save best model
+  if (!file.exists(model_save_file)){
+    saveRDS(best_model, model_save_file)
+    }
   
   list(
    # best_model = best_model,

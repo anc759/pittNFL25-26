@@ -11,6 +11,7 @@ library(pROC)
 library(dplyr)
 library(ggplot2)
 library(patchwork)
+library(progress)
 
 source("nfl_utils.R")
 source("model_utils.R")
@@ -23,14 +24,6 @@ source("model_utils.R")
 # Load in pre-processed data
 df_tracks <- read.csv("data/2023/processed_data.csv")
 
-# Load in and add tackle probabilities
-tackle_probs <- read.csv("data/2023/tackle_probs.csv")
-df_tracks <- df_tracks %>%
-  left_join(
-    tackle_probs %>%
-   select(game_id = gameId, play_id = playId, nfl_id = nflId, tackle_prob),
-    by = c("game_id", "play_id", "nfl_id"))
-
 # Build outcome
 outcome_df <- df_tracks %>%
   group_by(game_id, play_id, nfl_id) %>%
@@ -39,7 +32,6 @@ outcome_df <- df_tracks %>%
   mutate(
     outcome = 
       (
-        tackle_prob > .5 |
         sqrt((x - ball_land_x)^2 + (y - ball_land_y)^2) <= 2 |
         sqrt((x - target_x)^2 + (y - target_y)^2) <= 2
       )
@@ -115,51 +107,50 @@ param_grid <- list(
   subsample = c(0.5, 0.7, 1.0),
   colsample_bytree = c(0.5, 0.7, 1.0)
 )
-grid_list <- apply(
-  expand.grid(param_grid, KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE),
-  1,
-  as.list
-)
+#grid_list <- apply(
+#  expand.grid(param_grid, KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE),
+#  1,
+#  as.list
+#)
 
 # For fast testing
 grid_list <- list(
   list(nrounds = 100,
        eta = 0.1,
+       max_depth = 3),
+   list(nrounds = 50,
+       eta = 0.1,
        max_depth = 3)
 )
 
-source("model_utils.R")
 results <- finetune("AE",
                     df.train,
                     df.test,
                     features,
                     outcome,
                     grid_list,
-                    save_file = 'data/grid_search_results.rds'
+                    results_save_file = 'data/grid_search_results.rds',
+                    model_save_file = 'data/best_model.rds'
                     )
 
 
-# Get best parameters
+# Print best params and load model
 best_params <- results$best_params
-nrounds = best_params$nrounds
-best_params$nrounds <- NULL
+print(best_params)
+fit <- readRDS('data/best_model.rds')
 
-# Take best parameters and fit on full data
-X.train <- df_tracks[, features]
-Y.train <- df_tracks[[outcome]]
-fit <- fit_xgb_binary_classifier(nrounds, X.train, Y.train, best_params)
-
-# Print final eval metrics on data
-print(evaluate_model(fit, df_tracks, features, outcome))
+# Print eval metrics on train and test data
+print(evaluate_model(fit, df.train, features, outcome))
+print(evaluate_model(fit, df.test, features, outcome))
 
 # Print importance values
 print(xgb.importance(model = fit))
 
-# Generate predictions for players and save for further metric processing
-df_tracks$prob <- predict_model(fit, X.train)$prob
-
 # Save data
-cols <- c('game_id', 'play_id', 'nfl_id', 'frame_id', 'prob', 'outcome', 'output')
-write.csv(df_tracks[, cols], 'data/probs.csv')
+X.full <- df_tracks[, features]
+df_tracks$prob <- predict_model(fit, X.full)$prob
+to_save <- df_tracks %>%
+  select(game_id, play_id, nfl_id, frame_id, prob, inBallTRCircle = outcome, output)
+write.csv(to_save, 'data/probs.csv')
 
 
