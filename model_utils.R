@@ -1,22 +1,10 @@
-# Fitting binary classifiers
-fit_binary_classifier <- function(model_name, X, Y, ...) {
-  model_name <- tolower(model_name)
-  
-  if (model_name == "logistic") {
-    fit <- glm(Y ~ ., data = data.frame(Y = Y, X), family = binomial(), ...)
-    
-  } else if (model_name == "rf") {
-    if (!requireNamespace("randomForest", quietly = TRUE))
-      stop("Please install the 'randomForest' package.")
-    fit <- randomForest::randomForest(x = X, y = as.factor(Y), ...)
-    
-  } else if (model_name == "xgb") {
-    if (!requireNamespace("xgboost", quietly = TRUE))
-      stop("Please install the 'xgboost' package.")
-    dtrain <- xgboost::xgb.DMatrix(data = as.matrix(X), label = Y)
-    fit <- xgboost::xgb.train(data = dtrain, objective = 'binary:logistic', ...)
-    
-  } else stop("Unsupported model type: ", model_name)
+# Fitting xgb binary classifiers
+fit_xgb_binary_classifier <- function(nrounds, X, Y, ...) {
+  dtrain <- xgboost::xgb.DMatrix(data = as.matrix(X), label = Y)
+  fit <- xgboost::xgb.train(data = dtrain,
+                            nrounds = nrounds,
+                            objective = 'binary:logistic',
+                            ...)
   fit
 }
 
@@ -38,74 +26,135 @@ predict_model <- function(model, X_new) {
   list(prob = preds_prob, class = factor(preds))
 }
 
-
 # Evaluating on test data
-evaluate_model <- function(model, X_test, Y_test) {
+evaluate_model <- function(model, df.test, features, outcome) {
+  
   if (!requireNamespace("caret", quietly = TRUE))
     stop("Please install the 'caret' package.")
   if (!requireNamespace("pROC", quietly = TRUE))
     stop("Please install the 'pROC' package.")
-  
-  preds_out <- predict_model(model, X_test)
+
+  # Get predictions
+  X.test <- df.test[, features]
+  Y.test <- df.test[[outcome]]
+  preds_out <- predict_model(model, X.test)
   preds <- preds_out$class
   preds_prob <- preds_out$prob
-  
   preds_factor <- factor(preds, levels = c(0, 1))
-  Y_test_factor <- factor(Y_test, levels = c(0, 1))
-  
+  Y_test_factor <- factor(Y.test, levels = c(0, 1))
+
+  # Standard classification metrics
   cm <- caret::confusionMatrix(preds_factor, Y_test_factor, positive = "1")
   acc <- cm$overall["Accuracy"]
   precision <- cm$byClass["Precision"]
   recall <- cm$byClass["Recall"]
   f1 <- cm$byClass["F1"]
-  
   auc_val <- tryCatch({
     pROC::roc(response = Y_test, predictor = preds_prob, quiet = TRUE)$auc
   }, error = function(e) NA)
+
+  # Earliness metrics
+  df.test$yhat <- preds_factor
+
+  PAE <- df.test %>%
+    filter(outcome == 1) %>% 
+    group_by(game_id, play_id, nfl_id) %>%
+    arrange(game_id, play_id, nfl_id, frame_id) %>%
+    mutate(
+      max_frame = max(frame_id),
+      is_correct = yhat == outcome,
+      errors_ahead = rev(cumsum(rev(!is_correct))),
+      correct_from_here = errors_ahead == 0
+    ) %>%
+    filter(correct_from_here) %>%
+    summarize(
+      first_stable_frame = min(frame_id),
+      max_frame = first(max_frame),
+      .groups = 'drop'
+    ) %>%
+    mutate(earliness_score = (max_frame - first_stable_frame) / max_frame) %>%
+    group_by(game_id, play_id) %>%
+    summarize(
+      play_avg = mean(earliness_score),
+      .groups = 'drop'
+    ) %>%
+    summarize(overall_average = mean(play_avg, na.rm = TRUE)) %>%
+    pull(overall_average)
+
+
+  NAE <- df.test %>%
+    filter(outcome == 0) %>% 
+    group_by(game_id, play_id, nfl_id) %>%
+    arrange(game_id, play_id, nfl_id, frame_id) %>%
+    mutate(
+      max_frame = max(frame_id),
+      is_correct = yhat == outcome,
+      errors_ahead = rev(cumsum(rev(!is_correct))),
+      correct_from_here = errors_ahead == 0
+    ) %>%
+    filter(correct_from_here) %>%
+    summarize(
+      first_stable_frame = min(frame_id),
+      max_frame = first(max_frame),
+      .groups = 'drop'
+    ) %>%
+    mutate(earliness_score = (max_frame - first_stable_frame) / max_frame) %>%
+    group_by(game_id, play_id) %>%
+    summarize(
+      play_avg = mean(earliness_score),
+      .groups = 'drop'
+    ) %>%
+    summarize(overall_average = mean(play_avg, na.rm = TRUE)) %>%
+    pull(overall_average)
   
-  c(Accuracy = acc, AUC = auc_val, Precision = precision, Recall = recall, F1 = f1)
+  c(Accuracy = acc,
+    AUC = auc_val,
+    Precision = precision,
+    Recall = recall,
+    F1 = f1,
+    PAE = PAE,
+    NAE = NAE,
+    AE = (PAE + NAE)/2)
 }
 
-# Cross validate and fine tune models
-cross_validate_tune <- function(model_func, eval_func, X, Y, param_grid,
-                                folds = 10, seed = 101025, metric = "Accuracy") {
-  if (!requireNamespace("caret", quietly = TRUE))
-    stop("Please install the 'caret' package.")
-  
-  set.seed(seed)
-  folds_idx <- caret::createFolds(Y, k = folds, list = TRUE, returnTrain = FALSE)
-  
+# To finetune models based on test set
+finetune <- function(metric,
+                     df.train,
+                     df.test,
+                     features,
+                     outcome,
+                     param_grid,
+                     save_file) {
+
+  # Get training data
   results <- list()
+  X.train <- df.train[, features]
+  Y.train <- df.train[[outcome]]
   
   for (i in seq_along(param_grid)) {
-    params <- param_grid[[i]]
-    fold_metrics <- matrix(NA, nrow = folds, ncol = 5,
-                           dimnames = list(NULL, c("Accuracy", "AUC", "Precision", "Recall", "F1")))
-    
-    for (f in seq_along(folds_idx)) {
-      test_idx <- folds_idx[[f]]
-      train_idx <- setdiff(seq_along(Y), test_idx)
 
-      print(params)
-      model <- do.call(model_func, c(list(X = X[train_idx, , drop = FALSE],
-                                          Y = Y[train_idx]), params))
-      
-      metrics <- eval_func(model, X[test_idx, , drop = FALSE], Y[test_idx])
-      fold_metrics[f, ] <- metrics
-    }
-    
-    avg_metrics <- colMeans(fold_metrics, na.rm = TRUE)
-    results[[i]] <- list(params = params, folds = fold_metrics, avg_metrics = avg_metrics)
+    # Fit and evaluate model for each set of params
+    params <- param_grid[[i]]
+    nrounds = params$nrounds
+    params_mod <- params
+    params_mod$nrounds <- NULL
+    model <- fit_xgb_binary_classifier(nrounds, X.train, Y.train, params_mod)
+    metrics <- evaluate_model(model, df.test, features, outcome)
+    results[[i]] <- list(params = params, metrics = metrics)
+
+    saveRDS(results, file = save_file)
+ 
   }
-  
-  metric_values <- sapply(results, function(r) r$avg_metrics[[metric]])
+
+  # Find best set of params based on metric
+  metric_values <- sapply(results, function(r) r$metrics[[metric]])
   best_idx <- which.max(metric_values)
   best_params <- results[[best_idx]]$params
   
-  best_model <- do.call(model_func, c(list(X = X, Y = Y), best_params))
+  #best_model <- fit_binary_classifier(model_name, X.train, Y.train, best_params)
   
   list(
-    best_model = best_model,
+   # best_model = best_model,
     best_params = best_params,
     best_metrics = results[[best_idx]]$avg_metrics,
     all_results = results

@@ -855,46 +855,343 @@ nfl_add_voronoi <- function(
   )
 }
 
-
-
-# Adds speed and acceleration columns to the output dataset for easy merging        
-speed_acceleration <- function(
+speed_acceleration_direction <- function(
     data,
-    fps        = 10, # this is the standard fps used in NFL data (I think)
+    fps        = 10,
     group_cols = c("game_id", "play_id", "nfl_id"),
     x_col      = "x",
     y_col      = "y",
-    speed_col  = "s",   # name for speed column (to match that of input data)
-    accel_col  = "a"    # name for acceleration column
+    speed_col  = "s",      # name for speed column
+    accel_col  = "a",      # name for acceleration column
+    dir_col    = "dir"     # name for direction column (NEW)
 ) {
+  
   # time step between frames
   dt <- 1 / fps
-
+  
   # symbols for tidy evaluation
   x_sym      <- rlang::sym(x_col)
   y_sym      <- rlang::sym(y_col)
   speed_sym  <- rlang::sym(speed_col)
   accel_sym  <- rlang::sym(accel_col)
-
+  dir_sym    <- rlang::sym(dir_col)
+  
   data %>%
     # sort by group and frame so differences make sense
     dplyr::arrange(dplyr::across(dplyr::all_of(c(group_cols, "frame_id")))) %>%
     dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
     dplyr::mutate(
       # frame-to-frame displacement in yards
-      dx = !!x_sym - dplyr::lag(!!x_sym),
-      dy = !!y_sym - dplyr::lag(!!y_sym),
+      .dx = !!x_sym - dplyr::lag(!!x_sym),
+      .dy = !!y_sym - dplyr::lag(!!y_sym),
 
       # speed (yards / second)
-      !!speed_sym := sqrt(dx^2 + dy^2) / dt,
-
-      # acceleration (yards / second^2) = diff(speed) / dt
-      !!accel_sym := ( !!speed_sym - dplyr::lag(!!speed_sym) ) / dt
+      .s_new = pmin(sqrt(.dx^2 + .dy^2) / dt, 18)
     ) %>%
-    dplyr::ungroup()
+  dplyr::mutate(
+
+       # acceleration (yards / second^2) = diff(speed) / dt
+      .a_new = (.s_new - dplyr::lag(.s_new)) / dt,
+
+      # direction
+      .dir_raw = atan2(.dx, .dy) * 180 / pi,
+      .dir_new = (.dir_raw + 360) %% 360
+    ) %>%
+    
+    # apply only if column is NA
+    dplyr::mutate(
+      !!speed_sym := dplyr::if_else(is.na(!!speed_sym), .s_new, !!speed_sym),
+      !!accel_sym := dplyr::if_else(is.na(!!accel_sym), .a_new, !!accel_sym),
+      !!dir_sym   := dplyr::if_else(is.na(!!dir_sym), .dir_new, !!dir_sym)
+    ) %>%
+  
+  dplyr::select(-dplyr::starts_with(".")) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    s = pmin(s, 25),
+    a = pmax(pmin(a, 20), -20)
+  )
+}
+
+# For computing closing speed
+compute_closing_speed <- function(
+    x1, y1, s1, dir1,
+    x2, y2, s2, dir2
+) {
+
+  # Get vector components
+  rad1 <- (90 - dir1) * pi / 180
+  rad2 <- (90 - dir2) * pi / 180
+  v1x <- s1 * cos(rad1)
+  v1y <- s1 * sin(rad1)
+  v2x <- s2 * cos(rad2)
+  v2y <- s2 * sin(rad2)
+
+  # Vector differences
+  dvx <- v2x - v1x
+  dvy <- v2y - v1y
+  
+  # Displacement
+  dx <- x2 - x1
+  dy <- y2 - y1
+ 
+  distance <- sqrt(dx^2 + dy^2)
+  if (distance == 0) {
+    return(0)
+  }
+  
+  ux <- dx / distance
+  uy <- dy / distance
+  
+  s_rel <- (dvx * ux) + (dvy * uy)
+  
+  return(s_rel)
+}
+
+# Function for computing targeted reciever voronoi features
+# focus_pt is either tr for targeted receiver or ball for ball landing location
+compute_tr_voronoi <- function(
+    df_tracks,
+    focus_pt = "tr",         
+    field_xlim = c(0, 120),
+    field_ylim = c(0, 53.3)
+) {
+
+  # Define field
+  rect_mat <- matrix(
+    c(field_xlim[1], field_ylim[1],
+      field_xlim[1], field_ylim[2],
+      field_xlim[2], field_ylim[2],
+      field_xlim[2], field_ylim[1],
+      field_xlim[1], field_ylim[1]), 
+    byrow = TRUE, ncol = 2
+  )
+  field_poly <- sf::st_sfc(sf::st_polygon(list(rect_mat)), crs = sf::NA_crs_)
+
+  get_frame_voronoi_area <- function(curr_frame_data) {
+
+    # If focus is targeted reciever, make that targeted row
+    if (focus_pt == 'tr'){
+      target_row <- curr_frame_data[curr_frame_data$player_role == 'Targeted Receiver', ]
+    }
+    # Otherwise, focus on ball landing location and add it to voronoi area calculation
+    else {
+      landing_x <- curr_frame_data$ball_land_x[1]
+      landing_y <- curr_frame_data$ball_land_y[1]
+      ball_landing_row <- curr_frame_data[1,]
+      ball_landing_row$x <- landing_x
+      ball_landing_row$y <- landing_y
+      ball_landing_row$nfl_id <- -999L 
+      ball_landing_row$player_role <- 'Ball Landing Spot'
+      target_row <- ball_landing_row
+      curr_frame_data <- rbind(curr_frame_data, ball_landing_row)
+    }
+    
+    sf_pts <- sf::st_as_sf(curr_frame_data, coords = c("x", "y"), remove = FALSE, crs = sf::NA_crs_)
+    vor_raw <- sf::st_voronoi(sf::st_union(sf_pts), envelope = field_poly)
+    vor_polys <- sf::st_collection_extract(vor_raw, "POLYGON")
+    vor_sf <- sf::st_sf(geometry = vor_polys)
+    vor_sf <- suppressWarnings(sf::st_intersection(vor_sf, field_poly))
+    idx <- sf::st_nearest_feature(vor_sf, sf_pts)
+    target_index <- if (focus_pt == "tr") {
+      which(curr_frame_data$player_role == "Targeted Receiver")
+    } else {
+      which(curr_frame_data$player_role == "Ball Landing Spot")
+    }
+
+    target_poly <- vor_sf[idx == target_index, ]
+
+    if (focus_pt == "tr" && nrow(target_poly) > 0) {
+
+      tr_x <- target_row$x
+      play_dir <- target_row$play_direction
+
+      if (play_dir == "right") {
+        xmin <- max(field_xlim[1], tr_x - 5)
+        xmax <- field_xlim[2]
+      } else if (play_dir == "left") {
+        xmin <- field_xlim[1]
+        xmax <- min(field_xlim[2], tr_x + 5)
+      } else {
+        return(data.frame(voronoi_area = NA_real_))
+      }
+      
+      forward_rect <- matrix(
+        c(xmin, field_ylim[1],
+          xmin, field_ylim[2],
+          xmax, field_ylim[2],
+          xmax, field_ylim[1],
+          xmin, field_ylim[1]),
+        byrow = TRUE, ncol = 2
+      )
+
+      forward_poly <- sf::st_sfc(
+        sf::st_polygon(list(forward_rect)),
+        crs = sf::NA_crs_
+      )
+      target_poly <- suppressWarnings(
+        sf::st_intersection(target_poly, forward_poly)
+      )
+    }
+
+    area_val <- sum(sf::st_area(target_poly))
+    return(data.frame(voronoi_area = as.numeric(area_val)))
+  }
+
+  message('Computing Forward Voronoi areas, this may take a while')
+  library(data.table)
+  dt <- as.data.table(df_tracks)
+  result_df <- dt[, get_frame_voronoi_area(.SD), by = .(game_id, play_id, frame_id)]
+
+  return(result_df)
+ }  
+
+calculate_gaussian_density <- function(p_x, p_y, p_s, p_dir, t_x, t_y) {
+  # Create scaling matrix
+  max_speed <- 18
+  influence_radius <- 3
+  ratio <- p_s / max_speed
+  sx <- max(influence_radius + (influence_radius * ratio), .000001)
+  sy <- max(influence_radius - (influence_radius * ratio), .000001)
+  val_x <- sx / 2
+  val_y <- sy / 2
+  S_mat <- matrix(c(val_x, 0, 0, val_y), 2, 2)
+
+  # Make rotation matrix
+  theta <- (p_dir-90) * (pi / 180)
+  c_t <- cos(theta)
+  s_t <- sin(theta)
+  R_mat <- matrix(c(c_t, s_t, -s_t, c_t), 2, 2)
+  
+  # Make covariance matrix
+  Cov <- R_mat %*% (S_mat %*% S_mat) %*% t(R_mat)
+  
+  # Compute mean of gaussian
+  mu_x <- p_x + (0.5 * p_s * cos(theta))
+  mu_y <- p_y + (0.5 * p_s * sin(theta))
+
+  # Calculate density
+  diff_vec <- c(t_x - mu_x, t_y - mu_y)
+  det_cov  <- det(Cov)
+  cov_inv <- solve(Cov)
+  mahal <- t(diff_vec) %*% cov_inv %*% diff_vec
+  density <- (1 / (2 * pi * sqrt(det_cov))) * exp(-0.5 * mahal)
+  return(as.numeric(density))
+}
+calc_influence_v <- Vectorize(calculate_gaussian_density)
+
+# For computing team influence on targeted reciever
+compute_team_influence_on_tr <- function(df_tracks) {
+  
+  # Remove targeted receivers from influence calculation
+  df_calc <- df_tracks %>%
+    filter(player_role != "Targeted Receiver")
+
+  # Compute influence for every player on targeted reciever
+  df_calc <- df_calc %>%
+    mutate(
+      influence_value = calc_influence_v(x, y, s, dir, target_x, target_y)
+    )
+
+  # Compute team influence
+  result <- df_calc %>%
+    group_by(game_id, play_id, frame_id, player_side) %>%
+    summarise(total_inf = sum(influence_value), .groups = "drop") %>%
+    pivot_wider(
+      names_from = player_side, 
+      values_from = total_inf, 
+      values_fill = 0
+    )  %>%
+    mutate(
+    Offense  = ifelse(is.na(Offense), 0, Offense),
+    Defense  = ifelse(is.na(Defense), 0, Defense),
+    tr_net_influence = Offense - Defense
+    )
+
+  return(result)
+}
+
+# For computing team influence on ball landing location
+compute_team_influence_on_ball_land <- function(df_tracks) {
+
+  # Compute influence for every player on ball landing location
+  df_calc <- df_tracks %>%
+    mutate(
+      influence_value = calc_influence_v(x, y, s, dir, ball_land_x, ball_land_y)
+    )
+
+  # Compute team influence
+  result <- df_calc %>%
+    group_by(game_id, play_id, frame_id, player_side) %>%
+    summarise(total_inf = sum(influence_value), .groups = "drop") %>%
+    pivot_wider(
+      names_from = player_side, 
+      values_from = total_inf, 
+      values_fill = 0
+    ) %>%
+    mutate(
+      Offense  = ifelse(is.na(Offense), 0, Offense),
+      Defense  = ifelse(is.na(Defense), 0, Defense),
+      ball_net_influence = Offense - Defense
+    )
+  return(result)
+}
+
+# Next a function for computing the offensive influence on the defender besides targeted reciever
+compute_blocker_influence_on_defenders <- function(df_tracks) {
+  
+  # Find potential offensive blockers excluding targeted receiver
+  blockers <- df_tracks %>%
+    filter(
+      player_side == 'Offense',
+      player_role != 'Targeted Receiver'
+    ) %>%
+    select(game_id, play_id, frame_id, 
+           blocker_nfl_id = nfl_id, 
+           blocker_x = x, blocker_y = y, 
+           blocker_s = s, blocker_dir = dir)
+
+  # Grab defensive players that are involved later in play
+  true_defender_ids <- df_tracks %>%
+    filter(
+      player_side == 'Defense',
+      output == TRUE
+    ) %>%
+    distinct(game_id, play_id, nfl_id)
+  defenders <- df_tracks %>%
+    filter(player_side == "Defense") %>%
+    semi_join(true_defender_ids, by = c("game_id", "play_id", "nfl_id")) %>%
+    select(game_id, play_id, frame_id, 
+           defender_nfl_id = nfl_id, 
+           defender_x = x, defender_y = y)
+  
+  # Match blockers with defenders across all plays and frames
+  pair_df <- defenders %>%
+    inner_join(blockers, by = c("game_id", "play_id", "frame_id"), relationship = "many-to-many")
+
+  # Calculate offense influence on each individual defender
+  pair_df <- pair_df %>%
+    mutate(
+      influence_at_defender = calc_influence_v(
+        p_x = blocker_x, p_y = blocker_y, p_s = blocker_s, p_dir = blocker_dir,
+        t_x = defender_x, t_y = defender_y
+      )
+    )
+
+  # Aggregate influence
+  influence_summary <- pair_df %>%
+    group_by(game_id, play_id, frame_id, defender_nfl_id, defender_x, defender_y) %>%
+    summarise(
+      blocker_influence = sum(influence_at_defender, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(influence_summary)
 }
 
 
+
+####################
 # Code to plot field and probs basd on randomly sampled game and play id.
 # Requires input and output gameplay data.
 plot_field_and_probs <- function(df,
