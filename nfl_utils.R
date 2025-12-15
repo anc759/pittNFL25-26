@@ -1766,5 +1766,5 @@ generate_gif_of_probs_and_play <- function(df, GAMEID, PLAYID){
     combined_gif <- c(combined_gif, last_frame)
   }
 
-  image_write(combined_gif, format = "gif", path = paste(GAMEID,"_",PLAYID, ".gif", sep = ''))
+  image_write(combined_gif, format = "gif", path = paste('gifs/',GAMEID,"_",PLAYID, ".gif", sep = ''))
 }
