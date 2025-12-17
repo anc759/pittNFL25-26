@@ -1,0 +1,554 @@
+---
+title: "Graphs and Exploration (data_bowl)"
+output: html_document
+date: "2025-12-13"
+---
+
+############################
+PLEASE RUN THE FUNCTIONS IN Final_metric_Function_Pipeline
+############################
+
+
+
+
+############################
+PLAY LEVEL CHARTS
+############################
+
+
+```{r}
+play_data_filtered <- play_data #%>% filter(player_position == "FS",xpass <.6)
+```
+
+
+
+
+
+```{r}
+breakpoints <- c(0, .25, .75, 1)
+labels <- c("Surprise", "Toss-up", "Pass")
+
+# Create categories
+play_data$xpass_category <- cut(play_data$xpass, 
+                         breaks = breakpoints, 
+                         labels = labels,
+                         right = FALSE)
+```
+
+histogram chart
+```{r}
+
+play_data_filtered <- play_data
+play_data_filtered <- play_data_filtered %>%
+  mutate(in_circle_success = ifelse(in_circle_success == 1, "Yes", "No"))
+ggplot(play_data_filtered, aes(x = a_diff + r_diff, fill = in_circle_success)) + 
+
+  # Add black outline to bars for crisp definition
+  geom_histogram(position = "identity", alpha = 0.5, bins = 30, color = "black", size = 0.3) + 
+
+  # Muted/Pastel Palette
+  scale_fill_manual(values = c("#66C2A5", "#FC8D62")) + # Muted Green & Orange
+
+  labs(title = "Distribution of FDIFF for all plays", 
+       x = "Value of FDIFF", 
+       y = "Frequency", 
+       fill = "Did the\nDefender\nReach the\nCircle?") +
+
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    
+    # 1. Main Title Size (Increased to 20)
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 24), 
+    
+    # 2. Axis Titles (X and Y labels) Size (Increased to 16)
+    axis.title = element_text(size = 20),
+    
+    # 3. Legend Title Size (Increased to 14)
+    legend.title = element_text(size = 18),
+    
+    # Optional: Increase axis numbers size to match better
+    axis.text = element_text(color = "black", size = 16) 
+  )
+```
+
+
+compute accuracy for histogram
+```{r}
+predictions <- (play_data_filtered$a_diff + play_data_filtered$r_diff) > .05
+actuals <- play_data_filtered$in_circle_success == "Yes"
+correct_classifications <- predictions == actuals
+accuracy <- mean(correct_classifications, na.rm = TRUE)
+```
+
+
+
+
+
+
+
+############################
+PLAYER LEVEL CHARTS
+############################
+
+
+FILTERING OF PLAYER DATA
+
+
+this filters to create different charts
+```{r}
+player_data_filtered <- player_data  %>% filter(valid_plays>=25, player_position == "CB") %>% arrange(-circle_success_pct)
+```
+
+
+
+
+
+
+
+
+
+
+scatterplot adiff vs success rate
+
+```{r}
+ggplot(player_data_filtered, aes(x = avg_a_diff, y = circle_success_pct)) +
+  
+  # 1. Geometry
+  geom_point(aes(fill = player_position), 
+             shape = 21,       
+             color = "black",  
+             size = 3, 
+             stroke = 0.5,     
+             alpha = 0.8) +
+  
+  # 2. Trend Line
+  geom_smooth(method = "lm", se = FALSE, color = "grey40", linetype = "dashed") +
+  
+  # 3. Colors
+  scale_fill_manual(values = c("#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3")) + 
+  
+  # 4. Labels
+  labs(
+    title = "Average Anticipation (ADIFF) vs. Success Rate",
+    subtitle = "Minimum 25 valid plays required, player level data",
+    x = "Average Anticipation Difference (avg_a_diff)",
+    y = "Circle Success %",
+    fill = "Position",
+    caption = "Circle Success %: The percent of plays where the player gets close to either the ball or the defender."
+  ) +
+  
+  # 5. Theme
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    axis.text = element_text(color = "black"),
+    
+    # Center Title
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    
+    # Center Subtitle (Added this line)
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+
+
+
+
+
+
+
+
+Cb chart
+```{r}
+
+player_data_filtered$pro_bowler <- ifelse(player_data_filtered$nfl_id %in% c("53438","46757","54632","39984","55869","52458","54469"),1,0)
+
+median_x <- median(player_data_filtered$avg_a_diff, na.rm = TRUE)
+median_y <- median(player_data_filtered$total_plays / player_data_filtered$all_total_plays, na.rm = TRUE)
+
+# 2. Create a new category column to handle the color hierarchy
+# Default to "Others"
+player_data_filtered$color_group <- "Others"
+
+# Identify Top Tier (Green)
+is_in_zone <- player_data_filtered$avg_a_diff > median_x & 
+              (player_data_filtered$total_plays / player_data_filtered$all_total_plays) < median_y
+player_data_filtered$color_group[is_in_zone] <- "In Top Tier Zone"
+
+# Identify Pro Bowlers (Gold) 
+# Note: This overwrites "Top Tier Zone" if the player is a Pro Bowler, 
+# ensuring they appear Gold regardless of position.
+player_data_filtered$color_group[player_data_filtered$pro_bowler == 1] <- "Pro Bowler"
+
+# Optional: Set factor levels so the Legend appears in a specific order
+player_data_filtered$color_group <- factor(player_data_filtered$color_group, 
+                                           levels = c("Pro Bowler", "In Top Tier Zone", "Others"))
+
+# 3. Plots the updated code:
+
+ggplot(player_data_filtered, aes(x = avg_a_diff, y = total_plays / all_total_plays)) +
+  
+  # 1. Shading (Green background for the zone)
+  annotate("rect", xmin = median_x, xmax = Inf, 
+           ymin = -Inf, ymax = median_y, 
+           fill = "green", alpha = 0.1) +
+  
+  # 2. Explanatory Text (Bottom Right)
+  # UPDATED: fontface = "bold"
+  annotate("text", x = Inf, y = -Inf, 
+           label = "Top Tier Zone:\nElite Players with Low Targeted\n Rate and High ADIFF", 
+           color = "darkgreen", size = 5, fontface = "bold",
+           hjust = 1.1, vjust = -2) +
+  
+  # 3. Points
+  geom_point(aes(color = color_group), size = 3, alpha = 0.8) +
+  
+  # 4. Labels
+  geom_text_repel(
+    aes(
+      label = player_name,
+      color = color_group, 
+      fontface = ifelse(color_group == "Pro Bowler", "bold", "plain"),
+      size = color_group
+    ),
+    box.padding = 0.3,
+    point.padding = 0.3,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  
+  # 5. Custom Colors
+  scale_color_manual(values = c("Pro Bowler" = "#8B8000", 
+                                "In Top Tier Zone" = "darkgreen", 
+                                "Others" = "grey60"),
+                     name = "Player Group") +
+
+  # 6. Custom Sizes
+  scale_size_manual(values = c("Pro Bowler" = 4.5, 
+                               "In Top Tier Zone" = 4.5, 
+                               "Others" = 2.5)) +
+  
+  # 7. Median Lines
+  geom_vline(xintercept = median_x, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = median_y, color = "red", linetype = "dashed") +
+  
+  labs(
+    title = "Average ADIFF vs Targeted Rate",
+    subtitle = "Red lines represent median values for each variable",
+    x = "Average ADIFF",
+    y = "Percentage of Plays Targeted"
+  ) +
+  
+  theme_minimal() + 
+  
+  # 8. Theme Adjustments (CENTERED TITLE)
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 24, face = "bold", hjust = 0.5), 
+    plot.subtitle = element_text(size = 14, hjust = 0.5),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+```
+
+
+
+
+
+
+safety chart
+
+```{r}
+
+# 1. Calculate Medians & Groups (Same as before)
+x_median <- median(player_data_filtered$circle_success_pct, na.rm = TRUE)
+y_median <- median(player_data_filtered$avg_xpass, na.rm = TRUE)
+
+player_data_filtered <- player_data_filtered %>%
+  mutate(player_group = case_when(
+    circle_success_pct <= x_median ~ "Others",
+    avg_xpass >= y_median ~ "Likely Pass Scenarios",
+    TRUE ~ "Run Defense Scenarios"
+  ))
+
+# 2. Plot
+ggplot(player_data_filtered, aes(x = circle_success_pct, y = avg_xpass)) +
+  
+  # --- Background Shading ---
+  annotate("rect", xmin = x_median, xmax = Inf, 
+           ymin = -Inf, ymax = Inf, 
+           fill = "green", alpha = 0.1) +
+  
+  # --- Quadrant Labels (UPDATED SIZE) ---
+  annotate("text", x = Inf, y = Inf, label = "Top Tier Pass Focus Safeties", 
+           hjust = 1.1, vjust = 1.5, 
+           color = "darkblue", fontface = "bold.italic", alpha = 0.6,
+           size = 6) + # Increased size here
+  
+  annotate("text", x = Inf, y = -Inf, label = "Top Tier Run and Pass Focus Safeties", 
+           hjust = 1.1, vjust = -0.5, 
+           color = "firebrick", fontface = "bold.italic", alpha = 0.6,
+           size = 6) + # Increased size here
+
+  # --- Points ---
+  geom_point(aes(color = player_group), size = 3, alpha = 0.8) +
+  
+  # --- Player Names ---
+  geom_text_repel(
+    aes(label = player_name, color = player_group),
+    size = 3,
+    box.padding = 0.3,
+    max.overlaps = Inf
+  ) +
+  
+  # --- Colors & Lines ---
+  scale_color_manual(values = c(
+    "Likely Pass Scenarios" = "darkblue", 
+    "Run Defense Scenarios" = "firebrick", 
+    "Others" = "grey70"
+  )) +
+  
+  geom_vline(xintercept = x_median, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = y_median, color = "red", linetype = "dashed") +
+  
+  labs(
+    title = "Player Success vs Play Context",
+    subtitle = "Likely Pass vs. Possible Run Scenarios",
+    x = "Circle Success Percentage",
+    y = "Avg xPass (High = Likely Pass)"
+  ) +
+  
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+tables
+
+```{r}
+library(knitr) # For neat table display
+library(kableExtra)
+# Ensure your data is in a dataframe named player_data_filtered
+
+# Helper function to get top 10 and display
+get_top_10 <- function(data, sort_col, group_name, metric_name) {
+  data %>%
+    arrange(desc({{ sort_col }})) %>%
+    slice_head(n = 10) %>%
+    select(player_name, player_position, avg_a_diff, avg_r_diff) %>%
+    kable(caption = paste("Top 10", metric_name, "for", group_name))
+}
+
+# Split data into CB and Non-CB
+cb_data <- player_data_filtered %>% filter(player_position == "CB")
+non_cb_data <- player_data_filtered %>% filter(player_position != "CB")
+
+top_a <- cb_data %>%
+  arrange(desc(avg_a_diff)) %>%
+  slice_head(n = 10) %>%
+  mutate(Rank = row_number()) %>%
+  select(Rank, Player_A = player_name, Avg_A_Diff = avg_a_diff)
+
+# 3. Get Top 10 for avg_r_diff (keep only necessary columns)
+top_r <- cb_data %>%
+  arrange(desc(avg_r_diff)) %>%
+  slice_head(n = 10) %>%
+  select(Player_R = player_name, Avg_R_Diff = avg_r_diff)
+
+# 4. Combine into a single side-by-side data frame
+combined_cb_table <- bind_cols(top_a, top_r)
+
+# 5. Display as a neat table
+combined_cb_table %>%
+  kbl(
+    caption = "<b>Top 10 Cornerbacks: Anticipation vs. Reaction Differences</b>",
+    booktabs = TRUE, # Removes vertical lines for a classic "academic" look
+    col.names = c("Rank", "Player Name", "Avg A Diff", "Player Name", "Avg R Diff"),
+    digits = 3 # Round numeric columns to 3 decimal places automatically
+  ) %>%
+  kable_classic(full_width = F, html_font = "Arial") %>% # Professional font and width
+  add_header_above(c(" " = 1, "Top Anticipation Performers" = 2, "Top Reaction Performers" = 2)) %>% # The key grouping step
+  row_spec(0, bold = TRUE)
+
+top_a <- non_cb_data %>%
+  arrange(desc(avg_a_diff)) %>%
+  slice_head(n = 10) %>%
+  mutate(Rank = row_number()) %>%
+  select(Rank, Player_A = player_name, Avg_A_Diff = avg_a_diff)
+
+# 3. Get Top 10 for avg_r_diff (keep only necessary columns)
+top_r <- non_cb_data %>%
+  arrange(desc(avg_r_diff)) %>%
+  slice_head(n = 10) %>%
+  select(Player_R = player_name, Avg_R_Diff = avg_r_diff)
+combined_cb_table <- bind_cols(top_a, top_r)
+
+# 5. Display as a neat table
+combined_cb_table %>%
+  kbl(
+    caption = "<b>Top 10 Safeties: Acceleration vs. Reaction Differences</b>",
+    booktabs = TRUE, # Removes vertical lines for a classic "academic" look
+    col.names = c("Rank", "Player Name", "Avg A Diff", "Player Name", "Avg R Diff"),
+    digits = 3 # Round numeric columns to 3 decimal places automatically
+  ) %>%
+  kable_classic(full_width = F, html_font = "Arial") %>% # Professional font and width
+  add_header_above(c(" " = 1, "Top Acceleration Performers" = 2, "Top Reaction Performers" = 2)) %>% # The key grouping step
+  row_spec(0, bold = TRUE)
+
+```
+
+
+
+
+
+
+
+
+
+
+############################
+TEAM LEVEL CHARTS
+############################
+Didnt end up using these in submission
+```{r}
+blitz_data <- read.csv("/Users/alexanderdukart/blitz_data.csv")
+blitz_data$defensive_team <- c("ATL","BUF","CAR","CHI","CIN","CLE","IND","ARI","DAL","DEN","DET","GB","HOU","JAX","KC","MIA","MIN","NO","NE","NYG","NYJ","TEN","PHI","PIT","LV","LA","BAL","LAC","SEA","SF","TB","WAS")
+team_data <- team_data %>% left_join(blitz_data,by="defensive_team")
+team_data$blitz <- as.numeric(gsub("%", "", team_data$Bltz.)) / 100
+team_data$press <- as.numeric(gsub("%", "", team_data$Prss.)) / 100
+```
+
+
+
+```{r}
+ggplot(team_data, aes(x = reorder(defensive_team, circle_success_pct), y = circle_success_pct)) +
+  
+  # 1. Bars
+  geom_col(aes(fill = defensive_team), width = 0.8) +
+  scale_fill_nfl(type = "primary") +
+  
+  # 2. Logos at the end of the bars
+  # y = circle_success_pct places it at the end. 
+  # nudge_y = 0.01 pushes it 1% to the right so it sits "just off" the bar.
+  geom_nfl_logos(aes(team_abbr = defensive_team), width = 0.05, nudge_y = 0.03) +
+  
+  # 3. Axis Formatting
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  # 4. Zoom and Flip
+  # clip = "off" is crucial here! If a bar is near 30%, the logo will go 
+  # past the 0.3 limit. This setting ensures it doesn't get cut off.
+  coord_flip(ylim = c(0.15, 0.275), clip = "off") +
+  
+  theme_minimal() +
+  labs(x = NULL, y = "Circle Success Rate") +
+  
+  theme(
+    axis.text.y = element_blank(), # No text labels on the left
+    plot.margin = margin(r = 25, l = 10, t = 10, b = 10) # Extra right margin for logos
+  )
+```
+
+```{r}
+ggplot(team_data, aes(x = reorder(defensive_team, circle_success_pct), y = circle_success_pct)) +
+  
+  # 1. Bars
+  geom_col(aes(fill = defensive_team), width = 0.8) +
+  scale_fill_nfl(type = "primary") +
+  
+  # 2. Text Labels inside bars
+  geom_text(
+    aes(label = defensive_team), 
+    hjust = 3,          
+    color = "white",    
+    fontface = "bold",  
+    size = 3.5          
+  ) +
+
+  # 3. Logos at the end
+  geom_nfl_logos(aes(team_abbr = defensive_team), width = 0.05, nudge_y = 0.03) +
+  
+  # 4. Axis Formatting
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  # 5. Zoom and Flip
+  coord_flip(ylim = c(0.15, 0.275), clip = "off") +
+  
+  theme_minimal() +
+  
+  # --- UPDATED LABS SECTION ---
+  labs(
+    title = "Circle Success Percentage for each Team",  # Added Title
+    x = NULL, 
+    y = "Circle Success Rate"
+  ) +
+  
+  theme(
+    axis.text.y = element_blank(), 
+    plot.margin = margin(r = 25, l = 10, t = 10, b = 10),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14) # Centers and bolds the title
+  )
+```
+
+
+
+```{r}
+#team_data$avg_a_diff
+library(nflreadr) # Standard package for NFL data/colors
+library(scales)
+# 1. Get official team colors
+# We select just the abbreviation and primary color
+nfl_colors <- nflreadr::load_teams() %>% 
+  select(team_abbr, team_color)
+
+# 2. Join the colors to your stats data
+# Note: Ensure 'defensive_team' matches the standard abbreviations (e.g., "BUF", "KC")
+plot_data <- team_data_filtered %>%
+  select(circle_success_pct, avg_a_diff, avg_r_diff) %>%
+  pivot_longer(
+    cols = c(avg_a_diff, avg_r_diff), 
+    names_to = "metric", 
+    values_to = "value"
+  )
+
+# 3. Create the plot
+ggplot(plot_data, aes(x = reorder(defensive_team, circle_success_pct), y = circle_success_pct)) +
+  
+  # Map 'fill' to the actual hex code column
+  geom_col(aes(fill = team_color), width = 0.8) +
+  
+  # IMPORTANT: Tell ggplot that the data values ARE the colors
+  scale_fill_identity() +
+  
+  coord_flip() +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Defensive Team Performance",
+    subtitle = "Circle Success Rate (Colored by Team)",
+    x = NULL,
+    y = NULL
+  ) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    # Optional: Make the axis text slightly larger so team names are readable
+    axis.text.y = element_text(size = 10, face = "bold")
+  )
+```
+
+
+
+
+
+
+
+
+
+
+

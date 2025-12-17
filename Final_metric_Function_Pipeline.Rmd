@@ -1,0 +1,566 @@
+---
+title: "Final_metric_Function_Pipeline"
+output: html_document
+date: "2025-12-13"
+---
+
+libraries
+
+```{r}
+library(nflfastR)
+library(gsisdecoder)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(dotenv)
+```
+
+
+read in probability dataset and meta data
+```{r}
+probs <- read.csv("/Users/alexanderdukart/Downloads/probs_final.csv")
+load_dot_env(file = "/Users/alexanderdukart/Downloads/env.txt")
+meta_url <- Sys.getenv("META_URL")
+output_url <- Sys.getenv("OUTPUT_URL")
+input_url <- Sys.getenv("INPUT_URL")
+meta <- read_csv(meta_url)
+input <- read_csv(input_url)
+```
+
+load in nflFastR data and clean
+```{r}
+nflverse_pbp <- nflfastR::load_pbp(2023)
+nflverse_pbp$play_id
+nflverse_pbp <- nflverse_pbp %>% select(old_game_id,xpass,play_id)
+nflverse_pbp <- rename(nflverse_pbp,game_id = old_game_id)
+nflverse_pbp$game_id <- as.numeric(nflverse_pbp$game_id)
+```
+
+Create player names dataset from input
+
+```{r}
+#add player_position when working with newest data
+player_names <- input %>% select(nfl_id,player_name,player_position)
+player_names <- player_names[!duplicated(player_names), ]
+```
+
+
+
+
+
+
+create final meta dataset
+```{r}
+merged <- meta %>% left_join(nflverse_pbp,by = c("play_id","game_id"))
+meta_player_team <- merged %>% select(play_id,defensive_team,game_id,xpass,team_coverage_man_zone)
+```
+
+Create final Probs dataset that is passed to create metrics
+
+
+```{r}
+probs_final <- probs %>% left_join(meta_player_team,by=c("play_id","game_id"))
+probs_final <- probs_final %>% left_join(player_names,by="nfl_id")
+probs_final$xpass_low = ifelse(probs_final$xpass <= 0.6, 1, 0)
+```
+
+
+
+test
+
+
+
+```{r}
+calculate_player_stats <- function(data) {
+  
+  # --- Step 1: Calculate metrics per PLAY ---
+  # (No changes needed here, just ensuring xpass_low is passed through)
+  play_level_data <- data %>%
+    group_by(nfl_id, game_id, play_id, defensive_team, player_position, player_name, xpass, xpass_low) %>%
+    arrange(frame_id, .by_group = TRUE) %>%
+    summarise(
+
+      a_start_prob = nth(prob[output == FALSE],
+                      sum(output == FALSE) - 10,
+                      default = first(prob[output == FALSE])),
+      
+      valid_calc = sum(output == FALSE) >= 10 & sum(output == TRUE) >= 10 & a_start_prob >= .05,
+
+      in_circle_success = if_else(valid_calc, any(inBallTRCircle == TRUE, na.rm = TRUE), NA),
+      
+      r_diff = if_else(valid_calc, 
+                       nth(prob[output == TRUE], 10) - last(prob[output == FALSE]), 
+                       NA_real_),
+      
+      a_diff = if_else(valid_calc, 
+                       last(prob[output == FALSE]) - nth(prob[output == FALSE], sum(output == FALSE) - 10), 
+                       NA_real_),
+      
+      .groups = "drop"
+    ) %>%
+    mutate(
+      diff_val = r_diff - a_diff,
+      type = case_when(
+        is.na(diff_val) ~ NA_character_,
+        diff_val > 0.1  ~ "R",
+        diff_val < -0.1 ~ "A",
+        TRUE            ~ "M"
+      )
+    )
+  
+  # --- Step 2: Aggregate metrics per PLAYER ---
+  player_stats <- play_level_data %>%
+    group_by(nfl_id, defensive_team, player_position, player_name) %>%
+    summarise(
+      total_plays = n(),
+      valid_plays = sum(valid_calc, na.rm = TRUE),
+      
+      # 1. Overall Metric (All plays)
+      circle_success_pct = mean(in_circle_success, na.rm = TRUE),
+      
+      # 2. Specific Metric: Low Expected Pass (xpass_low == 1)
+      # We subset the logic vector [xpass_low == 1] inside the mean
+      circle_success_pct_low = mean(in_circle_success[xpass_low == 1], na.rm = TRUE),
+      
+      # 3. Specific Metric: High Expected Pass (xpass_low == 0)
+      circle_success_pct_high = mean(in_circle_success[xpass_low == 0], na.rm = TRUE),
+      
+      # Other averages
+      avg_r_diff = mean(r_diff, na.rm = TRUE),
+      avg_a_diff = mean(a_diff, na.rm = TRUE),
+      avg_diff_val = mean(diff_val, na.rm = TRUE),
+      avg_xpass = mean(xpass, na.rm = TRUE),
+      
+      pct_reactive = mean(type == "R", na.rm = TRUE),
+      pct_anticipatory = mean(type == "A", na.rm = TRUE),
+      pct_mixed = mean(type == "M", na.rm = TRUE),
+      
+      .groups = "drop"
+    ) %>%
+    arrange(desc(total_plays))
+  
+  return(player_stats)
+}
+probs_final_filtered <- probs_final
+player_data <- calculate_player_stats(probs_final_filtered)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+###############
+
+CREATE PLAY LEVEL DATA
+
+###############
+```{r}
+calculate_play_level_data <- function(data) {
+  
+  play_level_data <- data %>%
+    group_by(nfl_id, game_id, play_id, defensive_team, xpass, xpass_low, player_position,team_coverage_man_zone) %>%
+    arrange(frame_id, .by_group = TRUE) %>%
+    summarise(
+      
+      # NEW METRIC: Calculate the number of frames in the play
+      total_play_frames = max(frame_id, na.rm = TRUE),
+      
+      # 1. Did the player enter the circle on this play?
+      in_circle_success = any(inBallTRCircle == TRUE, na.rm = TRUE),
+      
+      # 2. Check frame requirements
+      valid_calc = sum(output == FALSE) >= 10 & sum(output == TRUE) >= 10,
+      
+      # 3. Calculate r_diff
+      r_diff = if_else(valid_calc, 
+                       nth(prob[output == TRUE], 10) - last(prob[output == FALSE]), 
+                       NA_real_),
+      
+      # 4. Calculate a_diff
+      a_diff = if_else(valid_calc, 
+                       last(prob[output == FALSE]) - nth(prob[output == FALSE], sum(output == FALSE) - 10), 
+                       NA_real_),
+      
+      .groups = "drop"
+    ) %>%
+    
+    # 5. Determine the 'Type' for valid plays
+    mutate(
+      diff_val = r_diff - a_diff,
+      type = case_when(
+        is.na(diff_val) ~ NA_character_,
+        diff_val > 0.1  ~ "R",
+        diff_val < -0.1 ~ "A",
+        TRUE            ~ "M"
+      )
+    )
+    
+  return(play_level_data)
+}
+play_data <- calculate_play_level_data(probs_final)
+
+```
+
+
+###############
+
+CREATE PLAYER LEVEL DATA
+
+###############
+
+
+```{r}
+calculate_player_stats <- function(data) {
+  
+  # --- Step 1: Calculate metrics per PLAY ---
+  # (No changes needed here, just ensuring xpass_low is passed through)
+  play_level_data <- data %>%
+    group_by(nfl_id, game_id, play_id, defensive_team, player_position, player_name, xpass, xpass_low) %>%
+    arrange(frame_id, .by_group = TRUE) %>%
+    summarise(
+      in_circle_success = any(inBallTRCircle == TRUE, na.rm = TRUE),
+      
+      valid_calc = sum(output == FALSE) >= 10 & sum(output == TRUE) >= 10,
+      
+      r_diff = if_else(valid_calc, 
+                       nth(prob[output == TRUE], 10) - last(prob[output == FALSE]), 
+                       NA_real_),
+      
+      a_diff = if_else(valid_calc, 
+                       last(prob[output == FALSE]) - nth(prob[output == FALSE], sum(output == FALSE) - 10), 
+                       NA_real_),
+      
+      .groups = "drop"
+    ) %>%
+    mutate(
+      diff_val = r_diff - a_diff,
+      type = case_when(
+        is.na(diff_val) ~ NA_character_,
+        diff_val > 0.1  ~ "R",
+        diff_val < -0.1 ~ "A",
+        TRUE            ~ "M"
+      )
+    )
+
+  # --- Step 2: Aggregate metrics per PLAYER ---
+  player_stats <- play_level_data %>%
+    group_by(nfl_id, defensive_team, player_position, player_name) %>%
+    summarise(
+      total_plays = n(),
+      valid_plays = sum(valid_calc, na.rm = TRUE),
+      
+      # 1. Overall Metric (All plays)
+      circle_success_pct = mean(in_circle_success, na.rm = TRUE),
+      
+      # 2. Specific Metric: Low Expected Pass (xpass_low == 1)
+      # We subset the logic vector [xpass_low == 1] inside the mean
+      circle_success_pct_low = mean(in_circle_success[xpass_low == 1], na.rm = TRUE),
+      
+      # 3. Specific Metric: High Expected Pass (xpass_low == 0)
+      circle_success_pct_high = mean(in_circle_success[xpass_low == 0], na.rm = TRUE),
+      
+      # Other averages
+      avg_r_diff = mean(r_diff, na.rm = TRUE),
+      avg_a_diff = mean(a_diff, na.rm = TRUE),
+      avg_diff_val = mean(diff_val, na.rm = TRUE),
+      avg_xpass = mean(xpass, na.rm = TRUE),
+      
+      pct_reactive = mean(type == "R", na.rm = TRUE),
+      pct_anticipatory = mean(type == "A", na.rm = TRUE),
+      pct_mixed = mean(type == "M", na.rm = TRUE),
+      
+      .groups = "drop"
+    ) %>%
+    arrange(desc(total_plays))
+    
+  return(player_stats)
+}
+#can do additional filtering here
+probs_final_filtered <- probs_final
+player_data <- calculate_player_stats(probs_final_filtered)
+player_play_counts <- input %>%
+  group_by(nfl_id) %>%
+  summarise(
+    all_total_plays = n_distinct(play_id)
+  ) %>%
+  arrange(desc(all_total_plays))
+player_data <- player_data %>% left_join(player_play_counts,by="nfl_id")
+```
+
+
+
+
+
+
+
+###############
+
+CREATE TEAM LEVEL DATA
+
+###############
+
+
+
+```{r}
+calculate_team_stats <- function(data) {
+  
+  # --- Step 1: Calculate metrics per PLAY (Same logic as before) ---
+  # We must generate the play-level metrics first
+  play_level_data <- data %>%
+    group_by(nfl_id, game_id, play_id, defensive_team) %>% # Keep defensive_team
+    arrange(frame_id, .by_group = TRUE) %>%
+    summarise(
+      # 1. Did the player enter the circle on this play?
+      in_circle_success = any(inBallTRCircle == TRUE, na.rm = TRUE),
+      
+      # 2. Check frame requirements
+      valid_calc = sum(output == FALSE) >= 10 & sum(output == TRUE) >= 10,
+      
+      # 3. Calculate r_diff
+      r_diff = if_else(valid_calc, 
+                       nth(prob[output == TRUE], 10) - last(prob[output == FALSE]), 
+                       NA_real_),
+      
+      # 4. Calculate a_diff
+      a_diff = if_else(valid_calc, 
+                       last(prob[output == FALSE]) - nth(prob[output == FALSE], sum(output == FALSE) - 10), 
+                       NA_real_),
+      
+      .groups = "drop"
+    ) %>%
+    mutate(
+      diff_val = r_diff - a_diff,
+      type = case_when(
+        is.na(diff_val) ~ NA_character_,
+        diff_val > 0.1  ~ "R",
+        diff_val < -0.1 ~ "A",
+        TRUE            ~ "M"
+      )
+    )
+
+  # --- Step 2: Aggregate metrics per TEAM ---
+  team_stats <- play_level_data %>%
+    group_by(defensive_team) %>%
+    summarise(
+      # Total Plays: Sum of all plays by all players on this team
+      # (Automatically accounts for volume differences)
+      total_plays = n(),
+      
+      # Valid Plays
+      valid_plays = sum(valid_calc, na.rm = TRUE),
+      
+      # Success %: Total Successful Plays / Total Plays
+      circle_success_pct = mean(in_circle_success, na.rm = TRUE),
+      
+      # Average Metrics: Calculated across ALL valid successful plays for the team
+      # This prevents a player with 1 play skewing the average
+      avg_r_diff = mean(r_diff, na.rm = TRUE),
+      avg_a_diff = mean(a_diff, na.rm = TRUE),
+      avg_diff_val = mean(diff_val, na.rm = TRUE),
+      
+      # Type Breakdown
+      pct_reactive = mean(type == "R", na.rm = TRUE),
+      pct_anticipatory = mean(type == "A", na.rm = TRUE),
+      pct_mixed = mean(type == "M", na.rm = TRUE),
+      
+      .groups = "drop"
+    ) %>%
+    arrange(desc(total_plays))
+    
+  return(team_stats)
+}
+probs_filtered <- probs_final #%>% filter(player_position !="CB")
+team_data <- calculate_team_stats(probs_filtered)
+```
+
+
+
+###############
+
+VARIATIONS OF THE ABOVE
+
+###############
+
+
+###############
+
+CREATE PLAYER LEVEL DATA but FILTER BY XPASS
+
+###############
+
+
+```{r}
+calculate_player_stats <- function(data) {
+  
+  # --- Step 1: Calculate metrics per PLAY ---
+  play_level_data <- data %>%
+    group_by(nfl_id, game_id, play_id, defensive_team, player_position, player_name,xpass_low) %>%
+    arrange(frame_id, .by_group = TRUE) %>%
+    summarise(
+      # 1. Did the player enter the circle on this play?
+      in_circle_success = any(inBallTRCircle == TRUE, na.rm = TRUE),
+      
+      # 2. Check frame requirements
+      valid_calc = sum(output == FALSE) > 0 & sum(output == TRUE) > 0,
+      
+      # 3. Calculate r_diff (Reactive)
+      r_diff = if_else(valid_calc, 
+                       last(prob[output == TRUE]) - first(prob[output == TRUE]), 
+                       NA_real_),
+      
+      # 4. Calculate a_diff (Anticipatory)
+      a_diff = if_else(valid_calc, 
+                       last(prob[output == FALSE]) - first(prob[output == FALSE]), 
+                       NA_real_),
+      
+      .groups = "drop"
+    ) %>%
+    
+    # 5. Determine the 'Type' for valid plays
+    mutate(
+      diff_val = r_diff - a_diff,
+      type = case_when(
+        is.na(diff_val) ~ NA_character_,
+        diff_val > 0.1  ~ "R",
+        diff_val < -0.1 ~ "A",
+        TRUE            ~ "M"
+      )
+    )
+
+  # --- Step 2: Aggregate metrics per PLAYER ---
+  player_stats <- play_level_data %>%
+    # FIX: Use dplyr::filter to correctly subset rows where xpass_low is 1
+    filter(xpass_low == 1) %>% 
+    group_by(nfl_id, defensive_team, player_position, player_name) %>%
+    summarise(
+      total_plays = n(),
+      valid_plays = sum(valid_calc, na.rm = TRUE),
+      circle_success_pct = mean(in_circle_success, na.rm = TRUE),
+      
+      # Averaging metrics only for successful plays
+      avg_r_diff = mean(r_diff, na.rm = TRUE),
+      avg_a_diff = mean(a_diff, na.rm = TRUE),
+      avg_diff_val = mean(diff_val, na.rm = TRUE),
+      
+      pct_reactive = mean(type == "R", na.rm = TRUE),
+      pct_anticipatory = mean(type == "A", na.rm = TRUE),
+      pct_mixed = mean(type == "M", na.rm = TRUE),
+      
+      .groups = "drop"
+    ) %>%
+    arrange(desc(total_plays))
+    
+  return(player_stats)
+}
+player_data <- calculate_player_stats(probs_final)
+```
+
+
+
+###############
+
+CREATE PLAYER LEVEL DATA but only incircleoutcome = FLASE
+
+###############
+
+
+```{r}
+calculate_player_stats <- function(data) {
+  
+  # --- Step 1: Calculate metrics per PLAY ---
+  # (No changes needed here, just ensuring xpass_low is passed through)
+  play_level_data <- data %>%
+    group_by(nfl_id, game_id, play_id, defensive_team, player_position, player_name, xpass, xpass_low) %>%
+    arrange(frame_id, .by_group = TRUE) %>%
+    summarise(
+      in_circle_success = any(inBallTRCircle == TRUE, na.rm = TRUE),
+      
+      valid_calc = sum(output == FALSE) >= 10 & sum(output == TRUE) >= 10,
+      
+      r_diff = if_else(valid_calc, 
+                       nth(prob[output == TRUE], 10) - last(prob[output == FALSE]), 
+                       NA_real_),
+      
+      a_diff = if_else(valid_calc, 
+                       last(prob[output == FALSE]) - nth(prob[output == FALSE], sum(output == FALSE) - 10), 
+                       NA_real_),
+      
+      .groups = "drop"
+    ) %>%
+    mutate(
+      diff_val = r_diff - a_diff,
+      type = case_when(
+        is.na(diff_val) ~ NA_character_,
+        diff_val > 0.1  ~ "R",
+        diff_val < -0.1 ~ "A",
+        TRUE            ~ "M"
+      )
+    )
+
+  # --- Step 2: Aggregate metrics per PLAYER ---
+  player_stats <- play_level_data %>%
+    group_by(nfl_id, defensive_team, player_position, player_name) %>%
+    summarise(
+      total_plays = n(),
+      valid_plays = sum(valid_calc, na.rm = TRUE),
+      
+      # 1. Overall Metric (All plays)
+      circle_success_pct = mean(in_circle_success, na.rm = TRUE),
+      
+      # 2. Specific Metric: Low Expected Pass (xpass_low == 1)
+      # We subset the logic vector [xpass_low == 1] inside the mean
+      circle_success_pct_low = mean(in_circle_success[xpass_low == 1], na.rm = TRUE),
+      
+      # 3. Specific Metric: High Expected Pass (xpass_low == 0)
+      circle_success_pct_high = mean(in_circle_success[xpass_low == 0], na.rm = TRUE),
+      
+      # Other averages
+      avg_r_diff = mean(r_diff[in_circle_success == 0], na.rm = TRUE),
+      avg_a_diff = mean(a_diff[in_circle_success == 0], na.rm = TRUE),
+      avg_diff_val = mean(diff_val[in_circle_success == 0], na.rm = TRUE),
+      avg_xpass = mean(xpass, na.rm = TRUE),
+      
+      pct_reactive = mean(type == "R", na.rm = TRUE),
+      pct_anticipatory = mean(type == "A", na.rm = TRUE),
+      pct_mixed = mean(type == "M", na.rm = TRUE),
+      
+      .groups = "drop"
+    ) %>%
+    arrange(desc(total_plays))
+    
+  return(player_stats)
+}
+probs_final_filtered <- probs_final
+player_data <- calculate_player_stats(probs_final_filtered)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
